@@ -289,7 +289,7 @@ class Transformer(t2t_model.T2TModel):
         dec_pos_bias_fwd = tf.expand_dims(tf.cast(dec_pos_bias_fwd, tf.float32), 2)
     else:
         if hparams.aan_mask:
-            dec_pos_bias_fwd = transformer_layers.attention_bias(tgt_mask, "aan") # TODO: remove useless modes
+            dec_pos_bias_fwd = transformer_layers.attention_bias(tgt_mask)
         else:
             dec_pos_bias_fwd = tf.cumsum(tgt_mask, axis=1)
             dec_pos_bias_fwd = tf.where(tf.less_equal(dec_pos_bias_fwd,0.), tf.ones_like(dec_pos_bias_fwd), dec_pos_bias_fwd)
