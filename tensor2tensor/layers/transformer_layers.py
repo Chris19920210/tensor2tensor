@@ -363,3 +363,109 @@ def transformer_ffn_layer(x,
   else:
     assert ffn_layer == "none"
     return x
+
+# ckpt-wd: attention_bias for transformer decoder
+def attention_bias(inputs, mode, inf=-1e9, name=None):
+  """ A bias tensor used in attention mechanism
+  :param inputs:
+  :param mode:
+  :param inf:
+  :param name:
+  :returns:
+  """
+  with tf.name_scope(name, default_name="attention_bias", values=[inputs]):
+    if mode == "causal":
+      length = inputs
+      lower_triangle = tf.matrix_band_part(
+        tf.ones([length, length]), -1, 0
+      )
+      ret = inf * (1.0 - lower_triangle)
+      return tf.reshape(ret, [1, 1, length, length])
+    elif mode == "masking":
+      mask = inputs
+      ret = (1.0 - mask) * inf
+      return tf.expand_dims(tf.expand_dims(ret, 1), 1)
+    elif mode == "aan":
+      length = tf.shape(inputs)[1]
+      diagonal = tf.eye(length)
+      cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
+      mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
+      mask *= cum_factor
+      weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
+      weight *= mask
+      return weight
+    elif mode == "proximal":
+      length = inputs
+      r = tf.to_float(tf.range(length))
+      diff = tf.expand_dims(r, 0) - tf.expand_dims(r, 1)
+      m = tf.expand_dims(tf.expand_dims(-tf.log(1 + tf.abs(diff)), 0), 0)
+      return m
+    elif mode == "distance":
+      length, distance = inputs
+      distance = tf.where(distance > length, 0, distance)
+      distance = tf.cast(distance, tf.int64)
+      lower_triangle = tf.matrix_band_part(
+        tf.ones([length, length]), -1, 0
+      )
+      mask_triangle = 1.0 - tf.matrix_band_part(
+        tf.ones([length, length]), distance - 1, 0
+      )
+      ret = inf * (1.0 - lower_triangle + mask_triangle)
+      return tf.reshape(ret, [1, 1, length, length])
+    else:
+      raise ValueError("Unknown mode %s" % mode)
+
+# ckpt-wd: dense layer for transformer
+def linear(inputs, output_size, bias, concat=True, dtype=None, scope=None):
+    """
+    Linear layer
+    :param inputs: A Tensor or a list of Tensors with shape [batch, input_size]
+    :param output_size: An integer specify the output size
+    :param bias: a boolean value indicate whether to use bias term
+    :param concat: a boolean value indicate whether to concatenate all inputs
+    :param dtype: an instance of tf.DType, the default value is ``tf.float32''
+    :param scope: the scope of this layer, the default value is ``linear''
+    :returns: a Tensor with shape [batch, output_size]
+    :raises RuntimeError: raises ``RuntimeError'' when input sizes do not
+                          compatible with each other
+    """
+    with tf.variable_scope(scope, default_name="linear", values=[inputs]):
+        if not isinstance(inputs, (list, tuple)):
+            inputs = [inputs]
+
+        input_size = [item.get_shape()[-1].value for item in inputs]
+
+        if len(inputs) != len(input_size):
+            raise RuntimeError("inputs and input_size unmatched!")
+
+        output_shape = tf.concat([tf.shape(inputs[0])[:-1], [output_size]],
+                                 axis=0)
+        # Flatten to 2D
+        inputs = [tf.reshape(inp, [-1, inp.shape[-1].value]) for inp in inputs]
+
+        results = []
+
+        if concat:
+            input_size = sum(input_size)
+            inputs = tf.concat(inputs, 1)
+
+            shape = [input_size, output_size]
+            matrix = tf.get_variable("matrix", shape, dtype=dtype)
+            results.append(tf.matmul(inputs, matrix))
+        else:
+            for i in range(len(input_size)):
+                shape = [input_size[i], output_size]
+                name = "matrix_%d" % i
+                matrix = tf.get_variable(name, shape, dtype=dtype)
+                results.append(tf.matmul(inputs[i], matrix))
+
+        output = tf.add_n(results)
+
+        if bias:
+            shape = [output_size]
+            bias = tf.get_variable("bias", shape, dtype=dtype)
+            output = tf.nn.bias_add(output, bias)
+
+        output = tf.reshape(output, output_shape)
+
+        return output
