@@ -121,7 +121,9 @@ def transformer_decode(decoder_function,
                        cache=None,
                        decode_loop_step=None,
                        nonpadding=None,
+                       pos=None,
                        losses=None,
+                       given_decoder=None,
                        **kwargs):
   """Decode Transformer outputs from encoder representation.
 
@@ -166,6 +168,8 @@ def transformer_decode(decoder_function,
       nonpadding=nonpadding,
       save_weights_to=attention_weights,
       losses=losses,
+      pos=pos,
+      given_decoder=given_decoder,
       **kwargs)
 
   if (common_layers.is_xla_compiled() and
@@ -206,13 +210,16 @@ class Transformer(t2t_model.T2TModel):
              decode_loop_step=None,
              nonpadding=None,
              losses=None,
+             pos=None,
+             given_decoder=None,
              **kwargs):
     """Decode Transformer outputs, see transformer_decode."""
     return transformer_decode(
         self._decoder_function, decoder_input, encoder_output,
         encoder_decoder_attention_bias, decoder_self_attention_bias,
         hparams, attention_weights=self.attention_weights, cache=cache,
-        decode_loop_step=decode_loop_step, nonpadding=nonpadding, losses=losses,
+        decode_loop_step=decode_loop_step, nonpadding=nonpadding, pos=pos, 
+        given_decoder=given_decoder, losses=losses,
         **kwargs)
 
   def body(self, features):
@@ -268,6 +275,25 @@ class Transformer(t2t_model.T2TModel):
           chunk_number=chunk_number_each_batch,
           )
 
+    # ckpt-wd: generate dec_pos_bias_fwd as pos at L222 at aan's transformer.py
+    # TODO: input datasets have to append tf tensors of input_length and target_length, the length of tokens in each sentence
+    tgt_len = features["target_length"]
+    # TODO: training when given_inputs is None at transformer-aan/code/thumt/models/transformer.py L117
+    given_decoder = None
+    tgt_mask = tf.sequence_mask(tgt_len,
+                                maxlen=tf.shape(targets)[1],
+                                dtype=tf.float32)
+    if given_decoder is not None:
+        dec_pos_bias_fwd = tf.cumsum(tgt_mask, axis=1)
+        dec_pos_bias_fwd = tf.where(tf.less_equal(dec_pos_bias_fwd, 0.), tf.ones_like(dec_pos_bias_fwd), dec_pos_bias_fwd)
+        dec_pos_bias_fwd = tf.expand_dims(tf.cast(dec_pos_bias_fwd, tf.float32), 2)
+    else:
+        if hparams.aan_mask:
+            dec_pos_bias_fwd = transformer_layers.attention_bias(tgt_mask, "aan") # TODO: remove useless modes
+        else:
+            dec_pos_bias_fwd = tf.cumsum(tgt_mask, axis=1)
+            dec_pos_bias_fwd = tf.where(tf.less_equal(dec_pos_bias_fwd,0.), tf.ones_like(dec_pos_bias_fwd), dec_pos_bias_fwd)
+            dec_pos_bias_fwd = tf.expand_dims(tf.cast(dec_pos_bias_fwd, tf.float32), 2)
     decoder_output = self.decode(
         decoder_input,
         encoder_output,
@@ -276,6 +302,8 @@ class Transformer(t2t_model.T2TModel):
         hparams,
         nonpadding=features_to_nonpadding(features, "targets"),
         losses=losses,
+        pos=dec_pos_bias_fwd,
+        given_decoder=given_decoder,
         **decode_kwargs
         )
 
@@ -1372,6 +1400,8 @@ def transformer_decoder(decoder_input,
                         layer_collection=None,
                         recurrent_memory_by_layer=None,
                         chunk_number=None,
+                        pos=None,
+                        given_decoder=None,
                         ):
   """A stack of transformer layers.
 
@@ -1430,7 +1460,7 @@ def transformer_decoder(decoder_input,
       },
       hparams=hparams)
 
-  with tf.variable_scope(name):
+  with tf.variable_scope(name, values=[decoder_input, encoder_output, decoder_self_attention_bias, encoder_decoder_attention_bias, pos]):
     for layer in range(hparams.num_decoder_layers or hparams.num_hidden_layers):
       layer_name = "layer_%d" % layer
       layer_cache = cache[layer_name] if cache is not None else None
@@ -1439,18 +1469,51 @@ def transformer_decoder(decoder_input,
       else:
         recurrent_memory = None
       with tf.variable_scope(layer_name):
-        with tf.variable_scope("self_attention"):
+        # ckpt-wd: replace masked multi-head attention with aan
+        # TODO: only for training when given_decoder is None at transformer-aan/code/thumt/models/transformer.py L117
+        if given_decoder is not None:
+          pass
+        else:
+          if not hparams.aan_mask: # TODO: add aan_mask into params
+            x_fwd = tf.cumsum(x, axis=1) / pos
+          else:
+            x_fwd = tf.matmul(pos, x)
+        # FFN activation
+        if hparams.aan_use_ffn: # TODO: add aan_use_ffn into hparams
+          y = transformer_ffn_layer(
+              common_layers.layer_preprocess(
+                  x_fwd, hparams, layer_collection=layer_collection),
+              hparams,
+              conv_padding="LEFT",
+              nonpadding_mask=nonpadding,
+              losses=losses,
+              cache=layer_cache,
+              decode_loop_step=decode_loop_step,
+              layer_collection=layer_collection)
+        else:
+          y = x_fwd
+
+        # gating layer
+        z = transformer_layers.linear(tf.concat([x, y], axis=-1),
+            hparams.hidden_size * 2, True, True, scope="z_project")
+        i_gate, f_gate = tf.split(z, [hparams.hidden_size, hparams.hidden_size], axis=-1)
+        y = tf.sigmoid(i_gate) * x + tf.sigmoid(f_gate) * y
+
+        x = common_layers.layer_postprocess(x, y, hparams)
+
+        '''with tf.variable_scope("self_attention"):
+
           y = common_attention.multihead_attention(
               common_layers.layer_preprocess(
                   x, hparams, layer_collection=layer_collection),
-              None,
-              decoder_self_attention_bias,
+              None, #
+              decoder_self_attention_bias,  #
               hparams.attention_key_channels or hparams.hidden_size,
               hparams.attention_value_channels or hparams.hidden_size,
               hparams.hidden_size,
               hparams.num_heads,
               hparams.attention_dropout,
-              attention_type=hparams.self_attention_type,
+              attention_type=hparams.self_attention_type, #
               max_relative_position=hparams.max_relative_position,
               heads_share_relative_embedding=(
                   hparams.heads_share_relative_embedding),
@@ -1460,16 +1523,16 @@ def transformer_decoder(decoder_input,
               make_image_summary=make_image_summary,
               dropout_broadcast_dims=attention_dropout_broadcast_dims,
               max_length=hparams.get("max_length"),
-              decode_loop_step=decode_loop_step,
+              decode_loop_step=decode_loop_step,  #
               vars_3d=hparams.get("attention_variables_3d"),
               activation_dtype=hparams.get("activation_dtype", "float32"),
               weight_dtype=hparams.get("weight_dtype", "float32"),
               layer_collection=layer_collection,
-              recurrent_memory=recurrent_memory,
-              chunk_number=chunk_number,
+              recurrent_memory=recurrent_memory,  #
+              chunk_number=chunk_number,  #
               hard_attention_k=hparams.get("hard_attention_k", 0)
               )
-          x = common_layers.layer_postprocess(x, y, hparams)
+          x = common_layers.layer_postprocess(x, y, hparams)'''
         if encoder_output is not None:
           with tf.variable_scope("encdec_attention"):
             y = common_attention.multihead_attention(
@@ -2660,7 +2723,7 @@ def transformer_wikitext103_l4k_memory_v0():
       hparams.max_length / hparams.split_targets_chunk_length))  # 262144
 
   hparams.pos = None
-  hparams.self_attention_type = "dot_product_relative_memory"
+  hparams.self_attention_type = "dot_product_relative"
   hparams.max_relative_position = 2 * hparams.split_targets_chunk_length
 
   hparams.add_hparam("unconditional", True)
