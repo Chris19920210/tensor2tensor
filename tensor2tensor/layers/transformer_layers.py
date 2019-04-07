@@ -365,55 +365,22 @@ def transformer_ffn_layer(x,
     return x
 
 # ckpt-wd: attention_bias for transformer decoder
-def attention_bias(inputs, mode, inf=-1e9, name=None):
+def attention_bias(inputs, inf=-1e9, name=None):
   """ A bias tensor used in attention mechanism
   :param inputs:
-  :param mode:
   :param inf:
   :param name:
   :returns:
   """
   with tf.name_scope(name, default_name="attention_bias", values=[inputs]):
-    if mode == "causal":
-      length = inputs
-      lower_triangle = tf.matrix_band_part(
-        tf.ones([length, length]), -1, 0
-      )
-      ret = inf * (1.0 - lower_triangle)
-      return tf.reshape(ret, [1, 1, length, length])
-    elif mode == "masking":
-      mask = inputs
-      ret = (1.0 - mask) * inf
-      return tf.expand_dims(tf.expand_dims(ret, 1), 1)
-    elif mode == "aan":
-      length = tf.shape(inputs)[1]
-      diagonal = tf.eye(length)
-      cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
-      mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
-      mask *= cum_factor
-      weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
-      weight *= mask
-      return weight
-    elif mode == "proximal":
-      length = inputs
-      r = tf.to_float(tf.range(length))
-      diff = tf.expand_dims(r, 0) - tf.expand_dims(r, 1)
-      m = tf.expand_dims(tf.expand_dims(-tf.log(1 + tf.abs(diff)), 0), 0)
-      return m
-    elif mode == "distance":
-      length, distance = inputs
-      distance = tf.where(distance > length, 0, distance)
-      distance = tf.cast(distance, tf.int64)
-      lower_triangle = tf.matrix_band_part(
-        tf.ones([length, length]), -1, 0
-      )
-      mask_triangle = 1.0 - tf.matrix_band_part(
-        tf.ones([length, length]), distance - 1, 0
-      )
-      ret = inf * (1.0 - lower_triangle + mask_triangle)
-      return tf.reshape(ret, [1, 1, length, length])
-    else:
-      raise ValueError("Unknown mode %s" % mode)
+    length = tf.shape(inputs)[1]
+    diagonal = tf.eye(length)
+    cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
+    mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
+    mask *= cum_factor
+    weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
+    weight *= mask
+    return weight
 
 # ckpt-wd: dense layer for transformer
 def linear(inputs, output_size, bias, concat=True, dtype=None, scope=None):
