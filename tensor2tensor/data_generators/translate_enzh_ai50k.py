@@ -146,7 +146,7 @@ class TranslateEnzhAi50k(translate.TranslateProblem):
         tag = "train" if train else "dev"
         filename_base = "wmt_enzh_%sk_tok_%s" % (self.approx_vocab_size, tag)
         data_path = translate.compile_data(tmp_dir, datasets, filename_base)
-        return text_problems.text2text_generate_encoded(
+        return text_problems.text2text_generate_aan_encoded(
             text_problems.text2text_txt_iterator(data_path + ".lang1",
                                                  data_path + ".lang2"),
             source_vocab, target_vocab)
