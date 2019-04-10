@@ -1264,49 +1264,6 @@ class AanTransformerScorer(AanTransformer):
     return {"outputs": targets, "scores": scores}
 
 
-@registry.register_model
-class TransformerEncoder(t2t_model.T2TModel):
-  """Transformer, encoder only."""
-
-  def body(self, features):
-    hparams = self._hparams
-    inputs = features["inputs"]
-    target_space = features["target_space_id"]
-
-    inputs = common_layers.flatten4d3d(inputs)
-
-    (encoder_input, encoder_self_attention_bias, _) = (
-        transformer_prepare_encoder(inputs, target_space, hparams))
-
-    encoder_input = tf.nn.dropout(encoder_input,
-                                  1.0 - hparams.layer_prepostprocess_dropout)
-    encoder_output = transformer_encoder(
-        encoder_input,
-        encoder_self_attention_bias,
-        hparams,
-        nonpadding=features_to_nonpadding(features, "inputs"))
-    encoder_output = tf.expand_dims(encoder_output, 2)
-
-    return encoder_output
-
-
-@registry.register_model
-class TransformerRegressor(TransformerEncoder):
-  """Transformer inheriting from Encoder, for the regression problem.
-
-  Final result is a tensor that has a shape of (?, 1, 1, 1).
-  """
-
-  def top(self, body_output, features):
-    """Computes single scalar value from body_output."""
-
-    with tf.variable_scope("reg_top_ffn"):
-      x = body_output
-      x = tf.reduce_mean(x, axis=[1, 2], keepdims=True)
-      res = tf.layers.dense(x, 1, name="model_top")
-      return res
-
-
 def features_to_nonpadding(features, inputs_or_targets="inputs"):
   key = inputs_or_targets + "_segmentation"
   if features and key in features:
@@ -1563,6 +1520,5 @@ class AanTransformerMemory(AanTransformer):
 def aan_transformer_base():
   """Base parameters for Transformer model."""
   hparams = transformer_base_v3()
-  hparams.aan = False
+  hparams.aan_mask = False
   return hparams
-
