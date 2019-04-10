@@ -37,6 +37,7 @@ from tensor2tensor.utils import beam_search
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
+from tensor2tensor.utils import expert_utils
 from tensor2tensor.models.transformer import transformer_base_v3
 
 import tensorflow as tf
@@ -186,6 +187,7 @@ class AanTransformer(t2t_model.T2TModel):
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
     self._encoder_function = transformer_encoder
     self._decoder_function = transformer_decoder
+    self._hparams.add_hparam('aan_mask', True)
 
   def encode(self, inputs, target_space, hparams, features=None, losses=None):
     """Encode transformer inputs, see transformer_encode."""
@@ -245,11 +247,11 @@ class AanTransformer(t2t_model.T2TModel):
     decoder_input, decoder_self_attention_bias = transformer_prepare_decoder(
         targets, hparams, features=features)
 
-    targets_raw = features["targets_raw"]
+    targets_raw = tf.squeeze(features["targets_raw"])
     tgt_mask = tf.where(tf.greater_equal(targets_raw, 1),
                         tf.ones_like(targets_raw, dtype=tf.float32), tf.zeros_like(targets_raw, dtype=tf.float32))
     if hparams.aan_mask:
-        dec_pos_bias_fwd = common_attention.attention_bias_aan(tgt_mask)
+        dec_pos_bias_fwd = attention_bias_aan(tgt_mask)
     else:
         dec_pos_bias_fwd = tf.cumsum(tgt_mask, axis=1)
         dec_pos_bias_fwd = tf.where(tf.less_equal(dec_pos_bias_fwd, 0.), tf.ones_like(dec_pos_bias_fwd),
@@ -1311,7 +1313,6 @@ def average_self_attention(
         pos=None,
         given_inputs=None,
         name="avg_self_attention"):
-
     with tf.variable_scope(name, default_name="avg_self_attention",
                            values=[query_antecedent]):
         if given_inputs is not None:
@@ -1472,13 +1473,18 @@ def transformer_decoder(decoder_input,
       with tf.variable_scope(layer_name):
         with tf.variable_scope("avg_attention"):
           y = average_self_attention(
-              common_layers.layer_preprocess(
-                  x, hparams, layer_collection=layer_collection),
+              #common_layers.layer_preprocess(
+              #    x, hparams, layer_collection=layer_collection),
+              x,
               hparams,
               pos=pos,
               given_inputs=layer_cache,
               name="avg_self_attention")
-          y = gate_layer(x, y, hparams)
+          #y = gate_layer(x, y, hparams)
+          y = gate_layer(
+              common_layers.layer_preprocess(
+                  x, hparams, layer_collection=layer_collection),
+              y, hparams)
           x = common_layers.layer_postprocess(x, y, hparams)
         if encoder_output is not None:
           with tf.variable_scope("encdec_attention"):
@@ -1579,3 +1585,16 @@ def aan_transformer_base():
   hparams = transformer_base_v3()
   hparams.aan_mask = False
   return hparams
+
+
+
+@expert_utils.add_name_scope()
+def attention_bias_aan(inputs, inf=-1e9):
+    length = tf.shape(inputs)[1]
+    diagonal = tf.eye(length)
+    cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
+    mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
+    mask *= cum_factor
+    weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
+    weight *= mask
+    return weight

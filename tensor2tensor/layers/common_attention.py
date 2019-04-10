@@ -1048,17 +1048,6 @@ def attention_bias_batch(batch_coordinates_q,
   return bias_batch
 
 
-@expert_utils.add_name_scope()
-def attention_bias_aan(inputs, inf=-1e9):
-    length = tf.shape(inputs)[1]
-    diagonal = tf.eye(length)
-    cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
-    mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
-    mask *= cum_factor
-    weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
-    weight *= mask
-    return weight
-
 # Mask to prevent individual sequences of the same batch to attend to each other
 attention_bias_coordinates = functools.partial(
     attention_bias_batch,
