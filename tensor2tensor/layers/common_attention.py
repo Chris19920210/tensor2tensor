@@ -932,6 +932,7 @@ def attention_bias_same_segment(query_segment_id, memory_segment_id):
   return tf.expand_dims(ret, axis=1)
 
 
+
 @expert_utils.add_name_scope()
 def attention_bias_ignore_padding(memory_padding):
   """Create an bias tensor to be added to attention logits.
@@ -1046,6 +1047,17 @@ def attention_bias_batch(batch_coordinates_q,
   bias_batch *= -1e9
   return bias_batch
 
+
+@expert_utils.add_name_scope()
+def attention_bias_aan(inputs, inf=-1e9):
+    length = tf.shape(inputs)[1]
+    diagonal = tf.eye(length)
+    cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
+    mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
+    mask *= cum_factor
+    weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
+    weight *= mask
+    return weight
 
 # Mask to prevent individual sequences of the same batch to attend to each other
 attention_bias_coordinates = functools.partial(
@@ -3962,6 +3974,27 @@ def compute_qkv(query_antecedent,
       vars_3d_num_heads=vars_3d_num_heads,
       layer_collection=layer_collection)
   return q, k, v
+
+
+def average_self_attention(
+        query_antecedent,
+        params,
+        layer,
+        pos=None,
+        given_inputs=None,
+        name="avg_self_attention"):
+
+    with tf.variable_scope(name, default_name="avg_self_attention",
+                           values=[query_antecedent]):
+        if given_inputs is not None:
+            x_fwd = (query_antecedent + given_inputs[layer]) / pos[0]
+            return x_fwd, tf.expand_dims(query_antecedent + given_inputs[layer], axis=0)
+        else:
+            if not params.aan_mask:
+                x_fwd = tf.cumsum(query_antecedent, axis=1) / pos[0]
+            else:
+                x_fwd = tf.matmul(pos[0], query_antecedent)
+            return x_fwd, None
 
 
 def multihead_attention(query_antecedent,

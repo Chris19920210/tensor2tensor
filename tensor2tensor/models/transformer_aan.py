@@ -40,6 +40,7 @@ from tensor2tensor.utils import expert_utils
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
+from tensor2tensor.models.transformer import transformer_base_v3
 
 import tensorflow as tf
 
@@ -115,13 +116,14 @@ def transformer_decode(decoder_function,
                        decoder_input,
                        encoder_output,
                        encoder_decoder_attention_bias,
-                       decoder_self_attention_bias,
                        hparams,
                        attention_weights=None,
                        cache=None,
                        decode_loop_step=None,
                        nonpadding=None,
                        losses=None,
+                       pos=None,
+                       given_inputs=None,
                        **kwargs):
   """Decode Transformer outputs from encoder representation.
 
@@ -158,7 +160,6 @@ def transformer_decode(decoder_function,
   decoder_output = decoder_function(
       decoder_input,
       encoder_output,
-      decoder_self_attention_bias,
       encoder_decoder_attention_bias,
       hparams,
       cache=cache,
@@ -166,6 +167,8 @@ def transformer_decode(decoder_function,
       nonpadding=nonpadding,
       save_weights_to=attention_weights,
       losses=losses,
+      pos=pos,
+      given_inputs=given_inputs,
       **kwargs)
 
   if (common_layers.is_xla_compiled() and
@@ -179,11 +182,11 @@ def transformer_decode(decoder_function,
 
 
 @registry.register_model
-class Transformer(t2t_model.T2TModel):
+class AanTransformer(t2t_model.T2TModel):
   """Attention net.  See file docstring."""
 
   def __init__(self, *args, **kwargs):
-    super(Transformer, self).__init__(*args, **kwargs)
+    super(AanTransformer, self).__init__(*args, **kwargs)
     self.attention_weights = {}  # For visualizing attention heads.
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
     self._encoder_function = transformer_encoder
@@ -200,19 +203,20 @@ class Transformer(t2t_model.T2TModel):
              decoder_input,
              encoder_output,
              encoder_decoder_attention_bias,
-             decoder_self_attention_bias,
              hparams,
              cache=None,
              decode_loop_step=None,
              nonpadding=None,
              losses=None,
+             pos=None,
+             given_inputs=None,
              **kwargs):
     """Decode Transformer outputs, see transformer_decode."""
     return transformer_decode(
         self._decoder_function, decoder_input, encoder_output,
-        encoder_decoder_attention_bias, decoder_self_attention_bias,
-        hparams, attention_weights=self.attention_weights, cache=cache,
+        encoder_decoder_attention_bias, hparams, attention_weights=self.attention_weights, cache=cache,
         decode_loop_step=decode_loop_step, nonpadding=nonpadding, losses=losses,
+        pos=pos, given_inputs=given_inputs,
         **kwargs)
 
   def body(self, features):
@@ -247,6 +251,17 @@ class Transformer(t2t_model.T2TModel):
     decoder_input, decoder_self_attention_bias = transformer_prepare_decoder(
         targets, hparams, features=features)
 
+    targets_raw = features["targets_raw"]
+    tgt_mask = tf.where(tf.greater_equal(targets_raw, 1),
+                        tf.ones_like(targets_raw, dtype=tf.float32), tf.zeros_like(targets_raw, dtype=tf.float32))
+    if hparams.aan_mask:
+        dec_pos_bias_fwd = common_attention.attention_bias_aan(tgt_mask)
+    else:
+        dec_pos_bias_fwd = tf.cumsum(tgt_mask, axis=1)
+        dec_pos_bias_fwd = tf.where(tf.less_equal(dec_pos_bias_fwd, 0.), tf.ones_like(dec_pos_bias_fwd),
+                                    dec_pos_bias_fwd)
+        dec_pos_bias_fwd = tf.expand_dims(tf.cast(dec_pos_bias_fwd, tf.float32), 2)
+
     # Not all subclasses of Transformer support keyword arguments related to
     # recurrent memory, so only pass these arguments if memory is enabled.
     decode_kwargs = {}
@@ -272,10 +287,10 @@ class Transformer(t2t_model.T2TModel):
         decoder_input,
         encoder_output,
         encoder_decoder_attention_bias,
-        decoder_self_attention_bias,
         hparams,
         nonpadding=features_to_nonpadding(features, "targets"),
         losses=losses,
+        pos=[dec_pos_bias_fwd],
         **decode_kwargs
         )
 
@@ -316,7 +331,7 @@ class Transformer(t2t_model.T2TModel):
     # For real-valued modalities use the slow decode path for now.
     if (self._target_modality_is_real or
         self._hparams.self_attention_type != "dot_product"):
-      return super(Transformer, self)._greedy_infer(features, decode_length)
+      return super(AanTransformer, self)._greedy_infer(features, decode_length)
     with tf.variable_scope(self.name):
       if use_tpu:
         return self._fast_decode_tpu(features, decode_length)
@@ -1204,14 +1219,14 @@ def fast_decode(encoder_output,
 
 
 @registry.register_model
-class TransformerScorer(Transformer):
+class AanTransformerScorer(AanTransformer):
   """Transformer model, but only scores in PREDICT mode.
 
   Checkpoints between Transformer and TransformerScorer are interchangeable.
   """
 
   def __init__(self, *args, **kwargs):
-    super(TransformerScorer, self).__init__(*args, **kwargs)
+    super(AanTransformerScorer, self).__init__(*args, **kwargs)
     self._name = "transformer"
     self._base_name = "transformer"
 
@@ -1359,7 +1374,6 @@ def transformer_prepare_decoder(targets, hparams, features=None):
 
 def transformer_decoder(decoder_input,
                         encoder_output,
-                        decoder_self_attention_bias,
                         encoder_decoder_attention_bias,
                         hparams,
                         cache=None,
@@ -1370,8 +1384,8 @@ def transformer_decoder(decoder_input,
                         make_image_summary=True,
                         losses=None,
                         layer_collection=None,
-                        recurrent_memory_by_layer=None,
-                        chunk_number=None,
+                        pos=None,
+                        given_inputs=None
                         ):
   """A stack of transformer layers.
 
@@ -1429,47 +1443,26 @@ def transformer_decoder(decoder_input,
           "hidden_size": hparams.hidden_size
       },
       hparams=hparams)
-
+  decoding_outputs = []
   with tf.variable_scope(name):
     for layer in range(hparams.num_decoder_layers or hparams.num_hidden_layers):
       layer_name = "layer_%d" % layer
       layer_cache = cache[layer_name] if cache is not None else None
-      if recurrent_memory_by_layer is not None:
-        recurrent_memory = recurrent_memory_by_layer[layer_name]
-      else:
-        recurrent_memory = None
+
       with tf.variable_scope(layer_name):
-        with tf.variable_scope("self_attention"):
-          y = common_attention.multihead_attention(
+        with tf.variable_scope("avg_attention"):
+          y, decode_state = common_attention.average_self_attention(
               common_layers.layer_preprocess(
                   x, hparams, layer_collection=layer_collection),
-              None,
-              decoder_self_attention_bias,
-              hparams.attention_key_channels or hparams.hidden_size,
-              hparams.attention_value_channels or hparams.hidden_size,
-              hparams.hidden_size,
-              hparams.num_heads,
-              hparams.attention_dropout,
-              attention_type=hparams.self_attention_type,
-              max_relative_position=hparams.max_relative_position,
-              heads_share_relative_embedding=(
-                  hparams.heads_share_relative_embedding),
-              add_relative_to_values=hparams.add_relative_to_values,
-              save_weights_to=save_weights_to,
-              cache=layer_cache,
-              make_image_summary=make_image_summary,
-              dropout_broadcast_dims=attention_dropout_broadcast_dims,
-              max_length=hparams.get("max_length"),
-              decode_loop_step=decode_loop_step,
-              vars_3d=hparams.get("attention_variables_3d"),
-              activation_dtype=hparams.get("activation_dtype", "float32"),
-              weight_dtype=hparams.get("weight_dtype", "float32"),
-              layer_collection=layer_collection,
-              recurrent_memory=recurrent_memory,
-              chunk_number=chunk_number,
-              hard_attention_k=hparams.get("hard_attention_k", 0)
-              )
+              hparams,
+              layer,
+              pos=pos,
+              given_inputs=given_inputs,
+              name="avg_self_attention")
+          y = transformer_layers.gate_layer(x, y, hparams)
           x = common_layers.layer_postprocess(x, y, hparams)
+          if given_inputs is not None:
+            decoding_outputs.append(decode_state)
         if encoder_output is not None:
           with tf.variable_scope("encdec_attention"):
             y = common_attention.multihead_attention(
@@ -1515,19 +1508,23 @@ def transformer_decoder(decoder_input,
     mlperf_log.transformer_print(
         key=mlperf_log.MODEL_HP_NORM,
         value={"hidden_size": hparams.hidden_size})
+    if given_inputs is not None:
+        decoding_outputs = tf.concat(decoding_outputs, axis=0)
+        return common_layers.layer_preprocess(
+        x, hparams, layer_collection=layer_collection), decoding_outputs
     return common_layers.layer_preprocess(
         x, hparams, layer_collection=layer_collection)
 
 
 @registry.register_model
-class TransformerMemory(Transformer):
+class AanTransformerMemory(AanTransformer):
   """Transformer language model with memory across chunks."""
 
   # TODO(kitaev): consider overriding set_mode to swap out recurrent memory when
   # switching between training and evaluation.
 
   def __init__(self, *args, **kwargs):
-    super(TransformerMemory, self).__init__(*args, **kwargs)
+    super(AanTransformerMemory, self).__init__(*args, **kwargs)
 
     hparams = self._hparams
     self.recurrent_memory_by_layer = {}
@@ -1552,7 +1549,7 @@ class TransformerMemory(Transformer):
   def has_input(self):
     if hasattr(self._hparams, "unconditional") and self._hparams.unconditional:
       return False
-    return super(TransformerMemory, self).has_input
+    return super(AanTransformerMemory, self).has_input
 
   def _beam_decode(self, features, decode_length, beam_size, top_beams, alpha,
                    use_tpu=False):
@@ -1562,1159 +1559,10 @@ class TransformerMemory(Transformer):
     return self._beam_decode_slow(features, decode_length, beam_size,
                                   top_beams, alpha, use_tpu)
 
-
 @registry.register_hparams
-def transformer_base_v1():
-  """Set of hyperparameters."""
-  hparams = common_hparams.basic_params1()
-  hparams.norm_type = "layer"
-  hparams.hidden_size = 512
-  hparams.batch_size = 4096
-  hparams.max_length = 256
-  hparams.clip_grad_norm = 0.  # i.e. no gradient clipping
-  hparams.optimizer_adam_epsilon = 1e-9
-  hparams.learning_rate_schedule = "legacy"
-  hparams.learning_rate_decay_scheme = "noam"
-  hparams.learning_rate = 0.1
-  hparams.learning_rate_warmup_steps = 4000
-  hparams.initializer_gain = 1.0
-  hparams.num_hidden_layers = 6
-  hparams.initializer = "uniform_unit_scaling"
-  hparams.weight_decay = 0.0
-  hparams.optimizer_adam_beta1 = 0.9
-  hparams.optimizer_adam_beta2 = 0.98
-  hparams.num_sampled_classes = 0
-  hparams.label_smoothing = 0.1
-  hparams.shared_embedding_and_softmax_weights = True
-  hparams.symbol_modality_num_shards = 16
-
-  # Add new ones like this.
-  hparams.add_hparam("filter_size", 2048)
-  # Layer-related flags. If zero, these fall back on hparams.num_hidden_layers.
-  hparams.add_hparam("num_encoder_layers", 0)
-  hparams.add_hparam("num_decoder_layers", 0)
-  # Attention-related flags.
-  hparams.add_hparam("num_heads", 8)
-  hparams.add_hparam("attention_key_channels", 0)
-  hparams.add_hparam("attention_value_channels", 0)
-  hparams.add_hparam("ffn_layer", "dense_relu_dense")
-  hparams.add_hparam("parameter_attention_key_channels", 0)
-  hparams.add_hparam("parameter_attention_value_channels", 0)
-  # All hyperparameters ending in "dropout" are automatically set to 0.0
-  # when not in training mode.
-  hparams.add_hparam("attention_dropout", 0.0)
-  hparams.add_hparam("attention_dropout_broadcast_dims", "")
-  hparams.add_hparam("relu_dropout", 0.0)
-  hparams.add_hparam("relu_dropout_broadcast_dims", "")
-  hparams.add_hparam("pos", "timing")  # timing, none
-  hparams.add_hparam("nbr_decoder_problems", 1)
-  hparams.add_hparam("proximity_bias", False)
-  hparams.add_hparam("causal_decoder_self_attention", True)
-  hparams.add_hparam("use_pad_remover", True)
-  hparams.add_hparam("self_attention_type", "dot_product")
-  hparams.add_hparam("conv_first_kernel", 3)
-  hparams.add_hparam("attention_variables_3d", False)
-  hparams.add_hparam("use_target_space_embedding", True)
-  # These parameters are only used when ffn_layer=="local_moe_tpu"
-  hparams.add_hparam("moe_overhead_train", 1.0)
-  hparams.add_hparam("moe_overhead_eval", 2.0)
-  hparams.moe_num_experts = 16
-  hparams.moe_loss_coef = 1e-3
-  # If specified, use this value instead of problem name in metrics.py.
-  # This is useful for programs that can automatically compare experiments side
-  #   by side based on the same metric names.
-  hparams.add_hparam("overload_eval_metric_name", "")
-  # For making a transformer encoder unidirectional by using masked
-  # attention.
-  hparams.add_hparam("unidirectional_encoder", False)
-  # For hard attention.
-  hparams.add_hparam("hard_attention_k", 0)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_v2():
-  """Set of hyperparameters."""
-  hparams = transformer_base_v1()
-  hparams.layer_preprocess_sequence = "n"
-  hparams.layer_postprocess_sequence = "da"
-  hparams.layer_prepostprocess_dropout = 0.1
-  hparams.attention_dropout = 0.1
-  hparams.relu_dropout = 0.1
-  hparams.learning_rate_warmup_steps = 8000
-  hparams.learning_rate = 0.2
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_vq_ada_32ex_packed():
-  """Set of hyperparameters for lm1b packed following tpu params."""
-  hparams = transformer_base_v2()
-  expert_utils.update_hparams_for_vq_gating(hparams)
-  hparams.moe_num_experts = 32
-  hparams.gating_type = "vq"
-  # this gives us a batch size of 16 because each seq is len 256
-  hparams.batch_size = 5072
-  hparams.ffn_layer = "local_moe"
-  hparams.shared_embedding_and_softmax_weights = False
-  hparams.learning_rate_warmup_steps = 10000
-  # one epoch for languagemodel_lm1b32k_packed = 27200 steps w/ bsize 128
-  hparams.learning_rate_decay_steps = 27200
-  hparams.num_heads = 4
-  hparams.num_blocks = 1
-  hparams.moe_k = 1
-  hparams.num_decoder_layers = 6
-  hparams.label_smoothing = 0.
-  hparams.layer_prepostprocess_dropout = 0.1
-  hparams.layer_postprocess_sequence = "dan"
-  hparams.layer_preprocess_sequence = "none"
-  hparams.weight_decay = 1e-06
-  hparams.attention_dropout = 0.1
-  hparams.optimizer = "Adafactor"
-  hparams.learning_rate_schedule = "linear_warmup*rsqrt_decay*linear_decay"
-  hparams.activation_dtype = "float32"
-  hparams.learning_rate = 0.1
-  hparams.learning_rate_constant = 1.0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_topk_16_packed():
-  hparams = transformer_base_vq_ada_32ex_packed()
-  hparams.gating_type = "topk"
-  hparams.moe_num_experts = 16
-  hparams.moe_k = 2
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_vq1_16_nb1_packed_nda_b01_scales():
-  """Set of hyperparameters."""
-  hparams = transformer_base_vq_ada_32ex_packed()
-  hparams.use_scales = int(True)
-  hparams.moe_num_experts = 16
-  hparams.moe_k = 1
-  hparams.beta = 0.1
-  hparams.layer_preprocess_sequence = "n"
-  hparams.layer_postprocess_sequence = "da"
-  hparams.ema = False
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_vq1_16_nb1_packed_dan_b01_scales():
-  """Set of hyperparameters."""
-  hparams = transformer_base_vq_ada_32ex_packed()
-  hparams.use_scales = int(True)
-  hparams.moe_num_experts = 16
-  hparams.moe_k = 1
-  hparams.beta = 0.1
-  hparams.ema = False
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_vq1_16_nb1_packed_nda_b01_scales_dialog():
-  """Set of hyperparameters."""
-  hparams = transformer_base_vq1_16_nb1_packed_nda_b01_scales()
-  hparams.batch_size = 2048
-  hparams.max_length = 1024
-  hparams.filter_size = 3072
-  return hparams
-
-
-@registry.register_hparams
-def transformer_ada_lmpackedbase():
-  """Set of hyperparameters."""
-  hparams = transformer_base_vq_ada_32ex_packed()
-  hparams.ffn_layer = "dense_relu_dense"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_ada_lmpackedbase_dialog():
-  """Set of hyperparameters."""
-  hparams = transformer_base_vq_ada_32ex_packed()
-  hparams.max_length = 1024
-  hparams.ffn_layer = "dense_relu_dense"
-  hparams.batch_size = 4096
-  return hparams
-
-
-@registry.register_hparams
-def transformer_ada_lmpackedbase_relative():
-  """Set of hyperparameters."""
-  hparams = transformer_base_vq_ada_32ex_packed()
-  hparams.ffn_layer = "dense_relu_dense"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_v3():
-  """Base parameters for Transformer model."""
-  # Update parameters here, then occasionally cut a versioned set, e.g.
-  # transformer_base_v2.
-  hparams = transformer_base_v2()
-  hparams.optimizer_adam_beta2 = 0.997
-  # New way of specifying learning rate schedule.
-  # Equivalent to previous version.
-  hparams.learning_rate_schedule = (
-      "constant*linear_warmup*rsqrt_decay*rsqrt_hidden_size")
-  hparams.learning_rate_constant = 2.0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base():
+def aan_transformer_base():
   """Base parameters for Transformer model."""
   hparams = transformer_base_v3()
-  return hparams
-
-
-@registry.register_hparams
-def transformer_big():
-  """HParams for transformer big model on WMT."""
-  hparams = transformer_base()
-  hparams.hidden_size = 1024
-  hparams.filter_size = 4096
-  # Reduce batch size to 2048 from 4096 to be able to train the model on a GPU
-  # with 12 GB memory. For example, NVIDIA TITAN V GPU.
-  hparams.batch_size = 2048
-  hparams.num_heads = 16
-  hparams.layer_prepostprocess_dropout = 0.3
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall():
-  """Hparams for transformer on LM for pretraining/finetuning/mixing."""
-  hparams = transformer_base()
-  hparams.batch_size = 2048
-  hparams.hidden_size = 768
-  hparams.filter_size = 3072
-  hparams.num_hidden_layers = 12
-  hparams.num_heads = 12
-  hparams.label_smoothing = 0.0
-  hparams.max_length = 1024
-  hparams.eval_drop_long_sequences = True
-  hparams.multiproblem_mixing_schedule = "pretrain"
-  hparams.multiproblem_vocab_size = 65536
-  hparams.clip_grad_norm = 1.0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_finetune_tied():
-  """Tied means fine-tune CNN/DM summarization as LM."""
-  hparams = transformer_tall()
-  hparams.multiproblem_max_input_length = 750
-  hparams.multiproblem_max_target_length = 100
-  hparams.multiproblem_schedule_max_examples = 0
-  hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
-  hparams.learning_rate_constant = 5e-5
-  hparams.learning_rate_warmup_steps = 100
-  # Set train steps to learning_rate_decay_steps or less
-  hparams.learning_rate_decay_steps = 80000
-  hparams.multiproblem_target_eval_only = True
-  hparams.multiproblem_reweight_label_loss = True
-  hparams.multiproblem_label_weight = 1.0
-  hparams.optimizer = "true_adam"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_train_tied():
-  """Tied means train CNN/DM summarization as LM."""
-  hparams = transformer_tall()
-  hparams.multiproblem_max_input_length = 750
-  hparams.multiproblem_max_target_length = 100
-  hparams.multiproblem_schedule_max_examples = 0
-  hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
-  hparams.learning_rate_constant = 2e-4
-  hparams.learning_rate_warmup_steps = 8000
-  # Set train steps to learning_rate_decay_steps or less
-  hparams.learning_rate_decay_steps = 150000
-  hparams.multiproblem_target_eval_only = True
-  hparams.multiproblem_reweight_label_loss = True
-  hparams.multiproblem_label_weight = 1.0
-  hparams.optimizer = "true_adam"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_finetune_uniencdec():
-  """Fine-tune CNN/DM with a unidirectional encoder and decoder."""
-  hparams = transformer_tall()
-  hparams.max_input_seq_length = 750
-  hparams.max_target_seq_length = 100
-  hparams.optimizer = "true_adam"
-  hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
-  hparams.learning_rate_decay_steps = 80000
-  hparams.learning_rate_constant = 5e-5
-  hparams.learning_rate_warmup_steps = 100
-  hparams.unidirectional_encoder = True
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_train_uniencdec():
-  """Train CNN/DM with a unidirectional encoder and decoder."""
-  hparams = transformer_tall()
-  hparams.max_input_seq_length = 750
-  hparams.max_target_seq_length = 100
-  hparams.optimizer = "true_adam"
-  hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
-  hparams.learning_rate_decay_steps = 150000
-  hparams.learning_rate_constant = 2e-4
-  hparams.unidirectional_encoder = True
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_finetune_textclass():
-  """Hparams for transformer on LM for finetuning on text class problems."""
-  hparams = transformer_tall()
-  hparams.learning_rate_constant = 6.25e-5
-  hparams.learning_rate_schedule = ("linear_warmup*constant*linear_decay")
-  hparams.multiproblem_schedule_max_examples = 0
-  hparams.multiproblem_target_eval_only = True
-  hparams.learning_rate_warmup_steps = 50
-  # Set train steps to learning_rate_decay_steps or less
-  hparams.learning_rate_decay_steps = 25000
-  hparams.multiproblem_reweight_label_loss = True
-  hparams.multiproblem_label_weight = 0.95
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_pretrain_lm():
-  """Hparams for transformer on LM pretraining (with 64k vocab)."""
-  hparams = transformer_tall()
-  hparams.learning_rate_constant = 2e-4
-  hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
-  hparams.optimizer = "adam_w"
-  hparams.optimizer_adam_beta1 = 0.9
-  hparams.optimizer_adam_beta2 = 0.999
-  hparams.optimizer_adam_epsilon = 1e-8
-  # Set max examples to something big when pretraining only the LM, definitely
-  # something an order of magnitude bigger than number of train steps.
-  hparams.multiproblem_schedule_max_examples = 5e8
-  # Set train steps to learning_rate_decay_steps or less
-  hparams.learning_rate_decay_steps = 5000000
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_pretrain_lm_tpu_adafactor():
-  """Hparams for transformer on LM pretraining (with 64k vocab) on TPU."""
-  hparams = transformer_tall_pretrain_lm()
-  update_hparams_for_tpu(hparams)
-  hparams.max_length = 1024
-  # For multi-problem on TPU we need it in absolute examples.
-  hparams.batch_size = 8
-  hparams.multiproblem_vocab_size = 2**16
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_pretrain_lm_tpu_adafactor_large():
-  """Hparams for transformer on LM pretraining on TPU, large model."""
-  hparams = transformer_tall_pretrain_lm_tpu_adafactor()
-  hparams.hidden_size = 1024
-  hparams.num_heads = 16
-  hparams.filter_size = 32768  # max fitting in 16G memory is 49152, batch 2
-  hparams.batch_size = 4
-  hparams.multiproblem_mixing_schedule = "constant"
-  # Task order: lm/en-de/en-fr/en-ro/de-en/fr-en/ro-en/cnndm/mnli/squad.
-  hparams.multiproblem_per_task_threshold = "320,80,160,1,80,160,2,20,10,5"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_pretrain_lm_tpu():
-  """Hparams for transformer on LM pretraining on TPU with AdamW."""
-  hparams = transformer_tall_pretrain_lm_tpu_adafactor()
-  # Optimizer gets reset in update_hparams_for_tpu so we set it again here.
-  hparams.learning_rate_constant = 2e-4
-  hparams.learning_rate_schedule = ("linear_warmup * constant * cosdecay")
-  hparams.optimizer = "adam_w"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tall_big():
-  """Hparams for transformer on LM+MNLI."""
-  hparams = transformer_tall()
-  hparams.num_hidden_layers = 18
-  return hparams
-
-
-@registry.register_hparams
-def transformer_big_single_gpu():
-  """HParams for transformer big model for single GPU."""
-  hparams = transformer_big()
-  hparams.layer_prepostprocess_dropout = 0.1
-  hparams.learning_rate_warmup_steps = 16000
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_single_gpu():
-  """HParams for transformer base model for single GPU."""
-  hparams = transformer_base()
-  hparams.batch_size = 1024
-  hparams.learning_rate_schedule = "constant*linear_warmup*rsqrt_decay"
-  hparams.learning_rate_constant = 0.1
-  hparams.learning_rate_warmup_steps = 16000
-  return hparams
-
-
-@registry.register_hparams
-def transformer_base_multistep8():
-  """HParams for simulating 8 GPUs with MultistepAdam optimizer."""
-  hparams = transformer_base()
-  hparams.optimizer = "MultistepAdam"
-  hparams.optimizer_multistep_accumulate_steps = 8
-  return hparams
-
-
-@registry.register_hparams
-def transformer_parsing_base():
-  """HParams for parsing on WSJ only."""
-  hparams = transformer_base()
-  hparams.attention_dropout = 0.2
-  hparams.layer_prepostprocess_dropout = 0.2
-  hparams.max_length = 512
-  hparams.learning_rate_warmup_steps = 16000
-  hparams.hidden_size = 1024
-  hparams.learning_rate = 0.05
-  hparams.shared_embedding_and_softmax_weights = False
-  return hparams
-
-
-@registry.register_hparams
-def transformer_parsing_big():
-  """HParams for parsing on WSJ semi-supervised."""
-  hparams = transformer_big()
-  hparams.max_length = 512
-  hparams.shared_source_target_embedding = False
-  hparams.learning_rate_warmup_steps = 4000
-  hparams.layer_prepostprocess_dropout = 0.1
-  hparams.batch_size = 2048
-  hparams.learning_rate = 0.05
-  return hparams
-
-
-@registry.register_hparams
-def transformer_parsing_ice():
-  """HParams for parsing and tagging Icelandic text."""
-  hparams = transformer_base_single_gpu()
-  hparams.batch_size = 4096
-  hparams.shared_embedding_and_softmax_weights = False
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tiny():
-  hparams = transformer_base()
-  hparams.num_hidden_layers = 2
-  hparams.hidden_size = 128
-  hparams.filter_size = 512
-  hparams.num_heads = 4
-  return hparams
-
-
-@registry.register_hparams
-def transformer_test():
-  hparams = transformer_base()
-  hparams.num_hidden_layers = 2
-  hparams.hidden_size = 16
-  hparams.filter_size = 8
-  hparams.num_heads = 2
-  return hparams
-
-
-@registry.register_hparams
-def transformer_small():
-  hparams = transformer_base()
-  hparams.num_hidden_layers = 2
-  hparams.hidden_size = 256
-  hparams.filter_size = 1024
-  hparams.num_heads = 4
-  return hparams
-
-
-@registry.register_hparams
-def transformer_l2():
-  hparams = transformer_base()
-  hparams.num_hidden_layers = 2
-  return hparams
-
-
-@registry.register_hparams
-def transformer_l4():
-  hparams = transformer_base()
-  hparams.num_hidden_layers = 4
-  return hparams
-
-
-@registry.register_hparams
-def transformer_l8():
-  hparams = transformer_base()
-  hparams.num_hidden_layers = 8
-  return hparams
-
-
-@registry.register_hparams
-def transformer_l10():
-  hparams = transformer_base()
-  hparams.num_hidden_layers = 10
-  return hparams
-
-
-@registry.register_hparams
-def transformer_h1():
-  hparams = transformer_base()
-  hparams.num_heads = 1
-  return hparams
-
-
-@registry.register_hparams
-def transformer_h4():
-  hparams = transformer_base()
-  hparams.num_heads = 4
-  return hparams
-
-
-@registry.register_hparams
-def transformer_h16():
-  hparams = transformer_base()
-  hparams.num_heads = 16
-  return hparams
-
-
-@registry.register_hparams
-def transformer_h32():
-  hparams = transformer_base()
-  hparams.num_heads = 32
-  return hparams
-
-
-@registry.register_hparams
-def transformer_k128():
-  hparams = transformer_base()
-  hparams.attention_key_channels = 128
-  return hparams
-
-
-@registry.register_hparams
-def transformer_k256():
-  hparams = transformer_base()
-  hparams.attention_key_channels = 256
-  return hparams
-
-
-@registry.register_hparams
-def transformer_ff1024():
-  hparams = transformer_base()
-  hparams.filter_size = 1024
-  return hparams
-
-
-@registry.register_hparams
-def transformer_ff4096():
-  hparams = transformer_base()
-  hparams.filter_size = 4096
-  return hparams
-
-
-@registry.register_hparams
-def transformer_dr0():
-  hparams = transformer_base()
-  hparams.layer_prepostprocess_dropout = 0.0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_dr2():
-  hparams = transformer_base()
-  hparams.layer_prepostprocess_dropout = 0.2
-  return hparams
-
-
-@registry.register_hparams
-def transformer_ls0():
-  hparams = transformer_base()
-  hparams.label_smoothing = 0.0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_ls2():
-  hparams = transformer_base()
-  hparams.label_smoothing = 0.2
-  return hparams
-
-
-@registry.register_hparams
-def transformer_hs256():
-  hparams = transformer_base()
-  hparams.hidden_size = 256
-  return hparams
-
-
-@registry.register_hparams
-def transformer_hs1024():
-  hparams = transformer_base()
-  hparams.hidden_size = 1024
-  return hparams
-
-
-@registry.register_hparams
-def transformer_big_dr1():
-  hparams = transformer_base()
-  hparams.hidden_size = 1024
-  hparams.filter_size = 4096
-  hparams.num_heads = 16
-  hparams.layer_prepostprocess_dropout = 0.1
-  return hparams
-
-
-@registry.register_hparams
-def transformer_big_enfr():
-  hparams = transformer_big_dr1()
-  hparams.shared_embedding_and_softmax_weights = False
-  hparams.filter_size = 8192
-  hparams.layer_prepostprocess_dropout = 0.1
-  return hparams
-
-
-@registry.register_hparams
-def transformer_big_enfr_tpu():
-  hparams = transformer_big_enfr()
-  # For performance, use fewer heads so that matrix dimensions are at least 128
-  hparams.num_heads = 8
-  update_hparams_for_tpu(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_big_dr2():
-  hparams = transformer_big_dr1()
-  hparams.layer_prepostprocess_dropout = 0.2
-  return hparams
-
-
-@registry.register_hparams
-def transformer_parameter_attention_a():
-  hparams = transformer_base()
-  hparams.ffn_layer = "parameter_attention"
-  hparams.filter_size = 1536
-  return hparams
-
-
-@registry.register_hparams
-def transformer_parameter_attention_b():
-  hparams = transformer_base()
-  hparams.ffn_layer = "parameter_attention"
-  hparams.filter_size = 512
-  hparams.parameter_attention_key_channels = 1024
-  hparams.parameter_attention_value_channels = 1024
-  hparams.num_heads = 16
-  return hparams
-
-
-@registry.register_hparams
-def transformer_prepend_v2():
-  hparams = transformer_base_v2()
-  hparams.prepend_mode = "prepend_inputs_masked_attention"
-  hparams.max_length = 0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_prepend_v1():
-  hparams = transformer_base_v1()
-  hparams.prepend_mode = "prepend_inputs_masked_attention"
-  hparams.max_length = 0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_prepend():
-  return transformer_prepend_v2()
-
-
-@registry.register_ranged_hparams
-def transformer_base_range(rhp):
-  """Small range of hyperparameters."""
-  # After starting from base, set intervals for some parameters.
-  rhp.set_float("learning_rate", 0.3, 3.0, scale=rhp.LOG_SCALE)
-  rhp.set_discrete("learning_rate_warmup_steps",
-                   [1000, 2000, 4000, 8000, 16000])
-  rhp.set_float("initializer_gain", 0.5, 2.0)
-  rhp.set_float("optimizer_adam_beta1", 0.85, 0.95)
-  rhp.set_float("optimizer_adam_beta2", 0.97, 0.99)
-  rhp.set_float("weight_decay", 0.0, 1e-4)
-
-
-@registry.register_hparams
-def transformer_relative():
-  """Use relative position embeddings instead of absolute position encodings."""
-  hparams = transformer_base()
-  hparams.pos = None
-  hparams.self_attention_type = "dot_product_relative"
-  hparams.max_relative_position = 20
-  return hparams
-
-
-@registry.register_hparams
-def transformer_relative_tiny():
-  hparams = transformer_relative()
-  hparams.num_hidden_layers = 2
-  hparams.hidden_size = 128
-  hparams.filter_size = 512
-  hparams.num_heads = 4
-  return hparams
-
-
-@registry.register_hparams
-def transformer_relative_big():
-  hparams = transformer_big()
-  hparams.pos = None
-  hparams.self_attention_type = "dot_product_relative"
-  hparams.max_relative_position = 20
-  return hparams
-
-
-@registry.register_hparams
-def transformer_timeseries():
-  hparams = transformer_small()
-  hparams.batch_size = 256
-  hparams.learning_rate_warmup_steps = 2000
-  return hparams
-
-
-@registry.register_hparams
-def transformer_mlperf_tpu():
-  """HParams for Transformer model on TPU for MLPerf on TPU 2x2."""
-  hparams = transformer_base_v3()
-  hparams.mlperf_mode = True
-  hparams.symbol_modality_num_shards = 1
-  hparams.max_length = 256  # ignored when using "_packed" problems
-  hparams.batch_size = 2048  # per-chip batch size matches the reference model
-  hparams.hidden_size = 1024
-  hparams.filter_size = 4096
-  hparams.num_heads = 16
-  hparams.attention_dropout_broadcast_dims = "0,1"  # batch, heads
-  hparams.relu_dropout_broadcast_dims = "1"  # length
-  hparams.layer_prepostprocess_dropout_broadcast_dims = "1"  # length
-  return hparams
-
-
-def update_hparams_for_tpu(hparams):
-  """Change hparams to be compatible with TPU training."""
-
-  # Adafactor uses less memory than Adam.
-  # switch to Adafactor with its recommended learning rate scheme.
-  hparams.optimizer = "Adafactor"
-  hparams.learning_rate_schedule = "rsqrt_decay"
-  hparams.learning_rate_warmup_steps = 10000
-
-  # Avoid an expensive concat on TPU.
-  # >1 shards helps with faster parameter distribution on multi-GPU machines
-  hparams.symbol_modality_num_shards = 1
-
-  # Adaptive batch sizes and sequence lengths are not supported on TPU.
-  # Instead, every batch has the same sequence length and the same batch size.
-  # Longer sequences are dropped and shorter ones are padded.
-  #
-  # It is therefore suggested to use a problem where examples have been combined
-  # to a longer length, e.g. the "_packed" problems.
-  #
-  # For problems with variable sequence lengths, this parameter controls the
-  # maximum sequence length.  Shorter sequences are dropped and longer ones
-  # are padded.
-  #
-  # For problems with fixed sequence lengths - e.g. the "_packed" problems,
-  # this hyperparameter is ignored.
-  hparams.max_length = 64
-
-  # TPUs have less memory than GPUs, so decrease the batch size
-  hparams.batch_size = 2048
-
-  # Using noise broadcast in the dropout layers saves memory during training.
-  hparams.attention_dropout_broadcast_dims = "0,1"  # batch, heads
-  hparams.relu_dropout_broadcast_dims = "1"  # length
-  hparams.layer_prepostprocess_dropout_broadcast_dims = "1"  # length
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tpu():
-  """HParams for Transformer model on TPU."""
-  hparams = transformer_base()
-  update_hparams_for_tpu(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_timeseries_tpu():
-  """HParams for running Transformer model on timeseries on TPU."""
-  hparams = transformer_timeseries()
-  update_hparams_for_tpu(hparams)
-  hparams.batch_size = 256  # revert to value set in transformer_timeseries
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tpu_bf16_activation():
-  """HParams for Transformer model with BF16 activation on TPU."""
-  hparams = transformer_tpu()
-  hparams.activation_dtype = "bfloat16"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_fairseq_fp16_activation_big():
-  """Hparams intended to mirror those used in arxiv.org/pdf/1806.00187.pdf."""
-  hparams = transformer_big()
-  hparams.activation_dtype = "float16"
-  hparams.batch_size = 3584
-  return hparams
-
-
-@registry.register_hparams
-def transformer_packed_tpu():
-  """Deprecated alias for transformer_tpu()."""
-  return transformer_tpu()
-
-
-@registry.register_hparams
-def transformer_big_tpu():
-  hparams = transformer_big()
-  update_hparams_for_tpu(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tiny_tpu():
-  hparams = transformer_tiny()
-  update_hparams_for_tpu(hparams)
-  return hparams
-
-
-@registry.register_ranged_hparams
-def transformer_tiny_tpu_range(rhp):
-  """Small range of hyperparameters."""
-  rhp.set_float("learning_rate", 0.3, 3.0, scale=rhp.LOG_SCALE)
-  rhp.set_float("weight_decay", 0.0, 2.0)
-
-
-@registry.register_ranged_hparams
-def transformer_tpu_range(rhp):
-  """Small range of hyperparameters."""
-  # After starting from base, set intervals for some parameters.
-  rhp.set_float("learning_rate", 0.3, 3.0, scale=rhp.LOG_SCALE)
-  rhp.set_discrete("learning_rate_warmup_steps",
-                   [1000, 2000, 4000, 8000, 16000])
-  rhp.set_float("initializer_gain", 0.5, 2.0)
-  rhp.set_float("optimizer_adam_beta1", 0.85, 0.95)
-  rhp.set_float("optimizer_adam_beta2", 0.97, 0.99)
-  rhp.set_float("weight_decay", 0.0, 2.0)
-
-
-@registry.register_hparams
-def transformer_small_tpu():
-  """TPU-friendly version of transformer_small.
-
-  Returns:
-    an hparams object.
-  """
-  hparams = transformer_small()
-  update_hparams_for_tpu(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_clean():
-  """No dropout, label smoothing, max_length."""
-  hparams = transformer_base_v2()
-  hparams.label_smoothing = 0.0
-  hparams.layer_prepostprocess_dropout = 0.0
-  hparams.attention_dropout = 0.0
-  hparams.relu_dropout = 0.0
-  hparams.max_length = 0
-  return hparams
-
-
-@registry.register_hparams
-def transformer_clean_big():
-  hparams = transformer_clean()
-  hparams.hidden_size = 1024
-  hparams.filter_size = 4096
-  return hparams
-
-
-@registry.register_hparams
-def transformer_clean_big_tpu():
-  hparams = transformer_clean_big()
-  update_hparams_for_tpu(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tpu_with_conv():
-  """Cut down on the number of heads, and use convs instead."""
-  hparams = transformer_tpu()
-  hparams.num_heads = 4  # Heads are expensive on TPUs.
-  hparams.ffn_layer = "conv_relu_conv"
-  return hparams
-
-
-@registry.register_hparams
-def transformer_lm_tpu_0():
-  """HParams for training languagemodel_lm1b8k on tpu.  92M Params."""
-  hparams = transformer_clean_big()
-  update_hparams_for_tpu(hparams)
-  hparams.num_heads = 4  # Heads are expensive on TPUs.
-  hparams.batch_size = 4096
-  hparams.shared_embedding_and_softmax_weights = False
-  hparams.layer_prepostprocess_dropout = 0.1
-  return hparams
-
-
-@registry.register_hparams
-def transformer_lm_tpu_1():
-  """HParams for training languagemodel_lm1b8k on tpu.  335M Params."""
-  hparams = transformer_lm_tpu_0()
-  hparams.hidden_size = 2048
-  hparams.filter_size = 8192
-  return hparams
-
-
-@registry.register_hparams
-def transformer_librispeech_v1():
-  """HParams for training ASR model on LibriSpeech V1."""
-  hparams = transformer_base()
-
-  hparams.num_heads = 4
-  hparams.filter_size = 1024
-  hparams.hidden_size = 256
-  hparams.num_encoder_layers = 5
-  hparams.num_decoder_layers = 3
-  hparams.learning_rate = 0.15
-  hparams.batch_size = 6000000
-
-  librispeech.set_librispeech_length_hparams(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_librispeech_v2():
-  """HParams for training ASR model on LibriSpeech V2."""
-  hparams = transformer_base()
-
-  hparams.max_length = 1240000
-  hparams.max_input_seq_length = 1550
-  hparams.max_target_seq_length = 350
-  hparams.batch_size = 16
-  hparams.num_decoder_layers = 4
-  hparams.num_encoder_layers = 6
-  hparams.hidden_size = 384
-  hparams.learning_rate = 0.15
-  hparams.daisy_chain_variables = False
-  hparams.filter_size = 1536
-  hparams.num_heads = 2
-  hparams.ffn_layer = "conv_relu_conv"
-  hparams.conv_first_kernel = 9
-  hparams.weight_decay = 0
-  hparams.layer_prepostprocess_dropout = 0.2
-  hparams.relu_dropout = 0.2
-
-  return hparams
-
-
-@registry.register_hparams
-def transformer_librispeech_tpu_v1():
-  """HParams for training ASR model on Librispeech on TPU v1."""
-  hparams = transformer_librispeech_v1()
-  update_hparams_for_tpu(hparams)
-
-  hparams.batch_size = 16
-  librispeech.set_librispeech_length_hparams(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_librispeech_tpu_v2():
-  """HParams for training ASR model on Librispeech on TPU v2."""
-  hparams = transformer_librispeech_v2()
-  update_hparams_for_tpu(hparams)
-
-  hparams.batch_size = 16
-  librispeech.set_librispeech_length_hparams(hparams)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_librispeech():
-  """HParams for training ASR model on Librispeech."""
-  return transformer_librispeech_v2()
-
-
-@registry.register_hparams
-def transformer_librispeech_tpu():
-  """HParams for training ASR model on Librispeech on TPU."""
-  return transformer_librispeech_tpu_v2()
-
-
-@registry.register_hparams
-def transformer_common_voice():
-  """HParams for training ASR model on Mozilla Common Voice."""
-  return transformer_librispeech()
-
-
-@registry.register_hparams
-def transformer_common_voice_tpu():
-  """HParams for training ASR model on Mozilla Common Voice on TPU."""
-  hparams = transformer_librispeech_tpu()
-  hparams.batch_size = 8
-  return hparams
-
-
-@registry.register_hparams
-def transformer_supervised_attention():
-  """HParams for supervised attention problems."""
-  hparams = transformer_base()
-  # Attention loss type (KL-divergence or MSE).
-  hparams.add_hparam("expected_attention_loss_type", "kl_divergence")
-  # Multiplier to the encoder-decoder expected attention loss.
-  hparams.add_hparam("expected_attention_loss_multiplier", 1.0)
-  return hparams
-
-
-@registry.register_hparams
-def transformer_tpu_1b():
-  """Hparams for machine translation with ~1.1B parameters."""
-  hparams = transformer_tpu()
-  hparams.hidden_size = 2048
-  hparams.filter_size = 8192
-  hparams.num_hidden_layers = 8
-  # smaller batch size to avoid OOM
-  hparams.batch_size = 1024
-  hparams.activation_dtype = "bfloat16"
-  hparams.weight_dtype = "bfloat16"
-  # maximize number of parameters relative to computation by not sharing.
-  hparams.shared_embedding_and_softmax_weights = False
-  return hparams
-
-
-@registry.register_hparams
-def transformer_wikitext103_l4k_v0():
-  """HParams for training languagemodel_wikitext103_l4k."""
-  hparams = transformer_big()
-
-  # Adafactor uses less memory than Adam.
-  # switch to Adafactor with its recommended learning rate scheme.
-  hparams.optimizer = "Adafactor"
-  hparams.learning_rate_schedule = "rsqrt_decay"
-  hparams.learning_rate_warmup_steps = 10000
-
-  hparams.num_heads = 4
-  hparams.max_length = 4096
-  hparams.batch_size = 4096
-  hparams.shared_embedding_and_softmax_weights = False
-
-  hparams.num_hidden_layers = 8
-  hparams.attention_dropout = 0.1
-  hparams.layer_prepostprocess_dropout = 0.2
-  hparams.relu_dropout = 0.1
-  hparams.label_smoothing = 0.0
-
-  # Using noise broadcast in the dropout layers saves memory during training.
-  hparams.attention_dropout_broadcast_dims = "0,1"  # batch, heads
-  hparams.relu_dropout_broadcast_dims = "1"  # length
-  hparams.layer_prepostprocess_dropout_broadcast_dims = "1"  # length
-
-  # Avoid an expensive concat on TPU.
-  # >1 shards helps with faster parameter distribution on multi-GPU machines
-  hparams.symbol_modality_num_shards = 1
-
-  return hparams
-
-
-@registry.register_hparams
-def transformer_wikitext103_l4k_memory_v0():
-  """HParams for training languagemodel_wikitext103_l4k with memory."""
-  hparams = transformer_wikitext103_l4k_v0()
-
-  hparams.split_targets_chunk_length = 64
-  hparams.split_targets_max_chunks = 64
-  hparams.add_hparam("memory_type", "transformer_xl")
-
-  # The hparams specify batch size *before* chunking, but we want to have a
-  # consistent 4K batch size *after* chunking to fully utilize the hardware.
-  target_tokens_per_batch = 4096
-  hparams.batch_size = int(target_tokens_per_batch * (
-      hparams.max_length / hparams.split_targets_chunk_length))  # 262144
-
-  hparams.pos = None
-  hparams.self_attention_type = "dot_product_relative_memory"
-  hparams.max_relative_position = 2 * hparams.split_targets_chunk_length
-
-  hparams.add_hparam("unconditional", True)
-  hparams.add_hparam("recurrent_memory_batch_size", 0)  # 0 = try to guess
-  # By default, cache one chunk only (like Transformer-XL)
-  hparams.add_hparam("num_memory_items", hparams.split_targets_chunk_length)
-
-  return hparams
-
-
-@registry.register_hparams
-def transformer_wikitext103_l16k_memory_v0():
-  """HParams for training languagemodel_wikitext103_l16k with memory."""
-  hparams = transformer_wikitext103_l4k_memory_v0()
-
-  hparams.max_length = 16384
-  hparams.split_targets_chunk_length = 64
-  hparams.split_targets_max_chunks = int(
-      hparams.max_length / hparams.split_targets_chunk_length)
-
-  # The hparams specify batch size *before* chunking, but we want to have a
-  # consistent 4K batch size *after* chunking to fully utilize the hardware.
-  target_tokens_per_batch = 4096
-  hparams.batch_size = int(target_tokens_per_batch * (
-      hparams.max_length / hparams.split_targets_chunk_length))
-
-  hparams.max_relative_position = 2 * hparams.split_targets_chunk_length
-
-  return hparams
-
-
-@registry.register_hparams
-def transformer_cifar10_memory_v0():
-  """HParams for training image_cifar10_plain_gen_flat_rev with memory."""
-  hparams = transformer_wikitext103_l4k_memory_v0()
-
-  hparams.num_hidden_layers = 6
-
-  hparams.max_length = 32 * 32 * 3
-  hparams.split_targets_chunk_length = 64 * 3
-  hparams.split_targets_max_chunks = int(
-      hparams.max_length / hparams.split_targets_chunk_length)
-  hparams.num_memory_items = 128 * 3
-
-  # Since this is an image problem, batch size refers to examples (not tokens)
-  target_images_per_batch = 4
-  hparams.batch_size = int(target_images_per_batch * (
-      hparams.max_length / hparams.split_targets_chunk_length))
-
-  # The recurrent memory needs to know the actual batch size (in sequences)
-  hparams.recurrent_memory_batch_size = hparams.batch_size
-
-  hparams.max_relative_position = (
-      hparams.num_memory_items + hparams.split_targets_chunk_length)
-
+  hparams.aan = False
   return hparams
 
