@@ -28,15 +28,12 @@ from __future__ import division
 from __future__ import print_function
 from six.moves import range  # pylint: disable=redefined-builtin
 
-from tensor2tensor.data_generators import librispeech
 from tensor2tensor.layers import common_attention
-from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import modalities
 from tensor2tensor.layers import transformer_layers
 from tensor2tensor.layers import transformer_memory
 from tensor2tensor.utils import beam_search
-from tensor2tensor.utils import expert_utils
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
@@ -123,7 +120,6 @@ def transformer_decode(decoder_function,
                        nonpadding=None,
                        losses=None,
                        pos=None,
-                       given_inputs=None,
                        **kwargs):
   """Decode Transformer outputs from encoder representation.
 
@@ -168,7 +164,6 @@ def transformer_decode(decoder_function,
       save_weights_to=attention_weights,
       losses=losses,
       pos=pos,
-      given_inputs=given_inputs,
       **kwargs)
 
   if (common_layers.is_xla_compiled() and
@@ -209,14 +204,13 @@ class AanTransformer(t2t_model.T2TModel):
              nonpadding=None,
              losses=None,
              pos=None,
-             given_inputs=None,
              **kwargs):
     """Decode Transformer outputs, see transformer_decode."""
     return transformer_decode(
         self._decoder_function, decoder_input, encoder_output,
         encoder_decoder_attention_bias, hparams, attention_weights=self.attention_weights, cache=cache,
         decode_loop_step=decode_loop_step, nonpadding=nonpadding, losses=losses,
-        pos=pos, given_inputs=given_inputs,
+        pos=pos,
         **kwargs)
 
   def body(self, features):
@@ -290,7 +284,7 @@ class AanTransformer(t2t_model.T2TModel):
         hparams,
         nonpadding=features_to_nonpadding(features, "targets"),
         losses=losses,
-        pos=[dec_pos_bias_fwd],
+        pos=dec_pos_bias_fwd,
         **decode_kwargs
         )
 
@@ -559,21 +553,17 @@ class AanTransformer(t2t_model.T2TModel):
       targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
       targets = preprocess_targets(targets, i)
 
-      bias_shape = decoder_self_attention_bias.shape.as_list()
-      bias = tf.slice(decoder_self_attention_bias, [0, 0, i, 0],
-                      [bias_shape[0], bias_shape[1], 1, bias_shape[3]])
-
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
             targets,
             cache.get("encoder_output"),
             cache.get("encoder_decoder_attention_bias"),
-            bias,
             hparams,
             cache,
             i,
-            nonpadding=features_to_nonpadding(features, "targets"))
+            nonpadding=features_to_nonpadding(features, "targets"),
+            pos=i)
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
@@ -783,18 +773,16 @@ class AanTransformer(t2t_model.T2TModel):
       targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
       targets = preprocess_targets(targets, i)
 
-      bias = decoder_self_attention_bias[:, :, i:i + 1, :i + 1]
-
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
             targets,
             cache.get("encoder_output"),
             cache.get("encoder_decoder_attention_bias"),
-            bias,
             hparams,
             cache,
-            nonpadding=features_to_nonpadding(features, "targets"))
+            nonpadding=features_to_nonpadding(features, "targets"),
+            pos=i)
 
       modality_name = hparams.name.get(
           "targets",
@@ -906,14 +894,7 @@ def fast_decode_tpu(encoder_output,
 
   cache = {
       "layer_%d" % layer: {  # pylint: disable=g-complex-comprehension
-          "k":
-          common_attention.split_heads(
-              tf.zeros([batch_size, decode_length, key_channels]),
-              hparams.num_heads),
-          "v":
-          common_attention.split_heads(
-              tf.zeros([batch_size, decode_length, value_channels]),
-              hparams.num_heads),
+          "dp": tf.zeros_like(encoder_output[:, :1, :])
       } for layer in range(num_layers)
   }
 
@@ -1106,12 +1087,7 @@ def fast_decode(encoder_output,
     cache = {}
   cache.update({
       "layer_%d" % layer: {  # pylint: disable=g-complex-comprehension
-          "k":
-              common_attention.split_heads(
-                  tf.zeros([batch_size, 0, key_channels]), hparams.num_heads),
-          "v":
-              common_attention.split_heads(
-                  tf.zeros([batch_size, 0, value_channels]), hparams.num_heads),
+          "dp": tf.zeros_like(encoder_output[:, :1, :]),
       } for layer in range(num_layers)
   })
 
@@ -1332,7 +1308,6 @@ def transformer_prepare_decoder(targets, hparams, features=None):
 def average_self_attention(
         query_antecedent,
         params,
-        layer,
         pos=None,
         given_inputs=None,
         name="avg_self_attention"):
@@ -1340,14 +1315,15 @@ def average_self_attention(
     with tf.variable_scope(name, default_name="avg_self_attention",
                            values=[query_antecedent]):
         if given_inputs is not None:
-            x_fwd = (query_antecedent + given_inputs[layer]) / pos[0]
-            return x_fwd, tf.expand_dims(query_antecedent + given_inputs[layer], axis=0)
+            x_fwd = (query_antecedent + given_inputs["dp"]) / pos
+            given_inputs["dp"] += query_antecedent
+            return x_fwd
         else:
             if not params.aan_mask:
-                x_fwd = tf.cumsum(query_antecedent, axis=1) / pos[0]
+                x_fwd = tf.cumsum(query_antecedent, axis=1) / pos
             else:
-                x_fwd = tf.matmul(pos[0], query_antecedent)
-            return x_fwd, None
+                x_fwd = tf.matmul(pos, query_antecedent)
+            return x_fwd
 
 
 def linear(inputs, output_size, bias, concat=True, dtype=None, scope=None):
@@ -1431,7 +1407,6 @@ def transformer_decoder(decoder_input,
                         losses=None,
                         layer_collection=None,
                         pos=None,
-                        given_inputs=None
                         ):
   """A stack of transformer layers.
 
@@ -1489,7 +1464,6 @@ def transformer_decoder(decoder_input,
           "hidden_size": hparams.hidden_size
       },
       hparams=hparams)
-  decoding_outputs = []
   with tf.variable_scope(name):
     for layer in range(hparams.num_decoder_layers or hparams.num_hidden_layers):
       layer_name = "layer_%d" % layer
@@ -1497,18 +1471,15 @@ def transformer_decoder(decoder_input,
 
       with tf.variable_scope(layer_name):
         with tf.variable_scope("avg_attention"):
-          y, decode_state = average_self_attention(
+          y = average_self_attention(
               common_layers.layer_preprocess(
                   x, hparams, layer_collection=layer_collection),
               hparams,
-              layer,
               pos=pos,
-              given_inputs=given_inputs,
+              given_inputs=layer_cache,
               name="avg_self_attention")
           y = gate_layer(x, y, hparams)
           x = common_layers.layer_postprocess(x, y, hparams)
-          if given_inputs is not None:
-            decoding_outputs.append(decode_state)
         if encoder_output is not None:
           with tf.variable_scope("encdec_attention"):
             y = common_attention.multihead_attention(
@@ -1554,10 +1525,7 @@ def transformer_decoder(decoder_input,
     mlperf_log.transformer_print(
         key=mlperf_log.MODEL_HP_NORM,
         value={"hidden_size": hparams.hidden_size})
-    if given_inputs is not None:
-        decoding_outputs = tf.concat(decoding_outputs, axis=0)
-        return common_layers.layer_preprocess(
-        x, hparams, layer_collection=layer_collection), decoding_outputs
+
     return common_layers.layer_preprocess(
         x, hparams, layer_collection=layer_collection)
 
