@@ -247,7 +247,7 @@ class AanTransformer(t2t_model.T2TModel):
     decoder_input, decoder_self_attention_bias = transformer_prepare_decoder(
         targets, hparams, features=features)
 
-    targets_raw = tf.squeeze(features["targets_raw"])
+    targets_raw = tf.squeeze(features["targets_raw"], [3,4])
     tgt_mask = tf.where(tf.greater_equal(targets_raw, 1),
                         tf.ones_like(targets_raw, dtype=tf.float32), tf.zeros_like(targets_raw, dtype=tf.float32))
     if hparams.aan_mask:
@@ -555,6 +555,7 @@ class AanTransformer(t2t_model.T2TModel):
       targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
       targets = preprocess_targets(targets, i)
 
+      print('--> symols_to_logits_tpu_fn')
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
@@ -565,7 +566,8 @@ class AanTransformer(t2t_model.T2TModel):
             cache,
             i,
             nonpadding=features_to_nonpadding(features, "targets"),
-            pos=i)
+            pos=tf.cast(i, tf.float32))
+            #pos=i)
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
@@ -775,6 +777,7 @@ class AanTransformer(t2t_model.T2TModel):
       targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
       targets = preprocess_targets(targets, i)
 
+      print('--> symbols_to_logits_fn')
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
@@ -784,7 +787,8 @@ class AanTransformer(t2t_model.T2TModel):
             hparams,
             cache,
             nonpadding=features_to_nonpadding(features, "targets"),
-            pos=i)
+            pos=tf.cast(i, tf.float32))
+            #pos=i)
 
       modality_name = hparams.name.get(
           "targets",
@@ -1316,6 +1320,7 @@ def average_self_attention(
     with tf.variable_scope(name, default_name="avg_self_attention",
                            values=[query_antecedent]):
         if given_inputs is not None:
+            print('dtype--->', query_antecedent.dtype, given_inputs["dp"].dtype, pos.dtype)
             x_fwd = (query_antecedent + given_inputs["dp"]) / pos
             given_inputs["dp"] += query_antecedent
             return x_fwd
