@@ -247,7 +247,7 @@ class AanTransformer(t2t_model.T2TModel):
     decoder_input, decoder_self_attention_bias = transformer_prepare_decoder(
         targets, hparams, features=features)
 
-    targets_raw = tf.squeeze(features["targets_raw"], [3,4])
+    targets_raw = tf.squeeze(features["targets_raw"], [2, 3])
     tgt_mask = tf.where(tf.greater_equal(targets_raw, 1),
                         tf.ones_like(targets_raw, dtype=tf.float32), tf.zeros_like(targets_raw, dtype=tf.float32))
     if hparams.aan_mask:
@@ -777,7 +777,6 @@ class AanTransformer(t2t_model.T2TModel):
       targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
       targets = preprocess_targets(targets, i)
 
-      print('--> symbols_to_logits_fn')
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
