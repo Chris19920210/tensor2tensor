@@ -565,7 +565,7 @@ class AanTransformer(t2t_model.T2TModel):
             cache,
             i,
             nonpadding=features_to_nonpadding(features, "targets"),
-            pos=tf.cast(i, tf.float32))
+            pos=tf.cast(i+1, tf.float32))
             #pos=i)
       modality_name = hparams.name.get(
           "targets",
@@ -1582,15 +1582,6 @@ class AanTransformerMemory(AanTransformer):
     return self._beam_decode_slow(features, decode_length, beam_size,
                                   top_beams, alpha, use_tpu)
 
-@registry.register_hparams
-def aan_transformer_base():
-  """Base parameters for Transformer model."""
-  hparams = transformer_base_v3()
-  hparams.aan_mask = False
-  return hparams
-
-
-
 @expert_utils.add_name_scope()
 def attention_bias_aan(inputs, inf=-1e9):
     length = tf.shape(inputs)[1]
@@ -1601,3 +1592,10 @@ def attention_bias_aan(inputs, inf=-1e9):
     weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
     weight *= mask
     return weight
+
+@registry.register_hparams
+def aan_transformer_base():
+  """Base parameters for Transformer model."""
+  hparams = transformer_base_v3()
+  hparams.aan_mask = False
+  return hparams

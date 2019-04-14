@@ -273,7 +273,6 @@ def decode_once(estimator,
     If decode_hp.decode_in_memory is False:
       An empty list.
   """
-
   # Get the predictions as an iterable
   predictions = estimator.predict(infer_input_fn,
                                   checkpoint_path=checkpoint_path)
@@ -309,6 +308,7 @@ def decode_once(estimator,
   # decoded output, and target strings for example i, beam rank j.
   all_outputs = []
   for num_predictions, prediction in enumerate(predictions):
+    t2 = time.time()
     num_eval_samples += 1
     num_predictions += 1
     inputs = prediction.get("inputs")
@@ -358,6 +358,8 @@ def decode_once(estimator,
           targets=targets,
           log_results=log_results)
       decoded_outputs.append(decoded)
+    t3 = time.time()
+    print("===>>> 2", t3 - t2, inputs.shape, targets.shape, outputs.shape)
 
     # Write out predictions if decode_to_file passed
     if decode_to_file:
