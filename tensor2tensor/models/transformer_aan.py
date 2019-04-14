@@ -1593,6 +1593,7 @@ def attention_bias_aan(inputs, inf=-1e9):
     weight *= mask
     return weight
 
+
 @registry.register_hparams
 def aan_transformer_base():
   """Base parameters for Transformer model."""
