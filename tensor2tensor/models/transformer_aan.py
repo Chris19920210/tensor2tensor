@@ -555,7 +555,6 @@ class AanTransformer(t2t_model.T2TModel):
       targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
       targets = preprocess_targets(targets, i)
 
-      print('--> symols_to_logits_tpu_fn')
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
@@ -786,7 +785,7 @@ class AanTransformer(t2t_model.T2TModel):
             hparams,
             cache,
             nonpadding=features_to_nonpadding(features, "targets"),
-            pos=tf.cast(i, tf.float32))
+            pos=tf.cast(i+1, tf.float32))
             #pos=i)
 
       modality_name = hparams.name.get(
