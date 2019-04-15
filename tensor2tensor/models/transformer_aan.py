@@ -140,6 +140,7 @@ def transformer_decode(decoder_function,
       for inference on TPU.
     nonpadding: optional Tensor with shape [batch_size, decoder_length]
     losses: optional list onto which to append extra training losses
+    pos: A mask for training, A position index for inference
     **kwargs: additional arguments to pass to decoder_function
 
   Returns:
@@ -1202,8 +1203,8 @@ class AanTransformerScorer(AanTransformer):
 
   def __init__(self, *args, **kwargs):
     super(AanTransformerScorer, self).__init__(*args, **kwargs)
-    self._name = "transformer"
-    self._base_name = "transformer"
+    self._name = "aan-transformer"
+    self._base_name = "aan-transformer"
 
   def infer(self,
             features=None,
@@ -1392,6 +1393,18 @@ def gate_layer(x,
         return x_fwd
 
 
+@expert_utils.add_name_scope()
+def attention_bias_aan(inputs, inf=-1e9):
+    length = tf.shape(inputs)[1]
+    diagonal = tf.eye(length)
+    cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
+    mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
+    mask *= cum_factor
+    weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
+    weight *= mask
+    return weight
+
+
 def transformer_decoder(decoder_input,
                         encoder_output,
                         encoder_decoder_attention_bias,
@@ -1431,10 +1444,7 @@ def transformer_decoder(decoder_input,
     losses: optional list onto which to append extra training losses
     layer_collection: A tensorflow_kfac.LayerCollection. Only used by the
       KFAC optimizer. Default is None.
-    recurrent_memory_by_layer: Optional dict, mapping layer names to instances
-      of transformer_memory.RecurrentMemory. Default is None.
-    chunk_number: an optional integer Tensor with shape [batch] used to operate
-      the recurrent_memory.
+    pos: A mask for training, A position index for inference
 
   Returns:
     y: a Tensors
@@ -1570,18 +1580,6 @@ class AanTransformerMemory(AanTransformer):
     """
     return self._beam_decode_slow(features, decode_length, beam_size,
                                   top_beams, alpha, use_tpu)
-
-
-@expert_utils.add_name_scope()
-def attention_bias_aan(inputs, inf=-1e9):
-    length = tf.shape(inputs)[1]
-    diagonal = tf.eye(length)
-    cum_factor = tf.expand_dims(tf.cumsum(diagonal, axis=0), 0)
-    mask = tf.expand_dims(inputs, 1) * tf.expand_dims(inputs, 2)
-    mask *= cum_factor
-    weight = tf.nn.softmax(mask + (1.0 - mask) * inf)
-    weight *= mask
-    return weight
 
 
 @registry.register_hparams
