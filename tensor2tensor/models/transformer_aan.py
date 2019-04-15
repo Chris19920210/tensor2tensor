@@ -132,8 +132,6 @@ def transformer_decode(decoder_function,
       hidden_dim]
     encoder_decoder_attention_bias: Bias and mask weights for encoder-decoder
       attention. [batch_size, input_length]
-    decoder_self_attention_bias: Bias and mask weights for decoder
-      self-attention. [batch_size, decoder_length]
     hparams: hyperparameters for model.
     attention_weights: weight to store attention to.
     cache: dict, containing tensors which are the results of previous
@@ -1413,8 +1411,6 @@ def transformer_decoder(decoder_input,
   Args:
     decoder_input: a Tensor
     encoder_output: a Tensor
-    decoder_self_attention_bias: bias Tensor for self-attention (see
-      common_attention.attention_bias())
     encoder_decoder_attention_bias: bias Tensor for encoder-decoder attention
       (see common_attention.attention_bias())
     hparams: hyperparameters for model
@@ -1472,14 +1468,11 @@ def transformer_decoder(decoder_input,
       with tf.variable_scope(layer_name):
         with tf.variable_scope("avg_attention"):
           y = average_self_attention(
-              #common_layers.layer_preprocess(
-              #    x, hparams, layer_collection=layer_collection),
               x,
               hparams,
               pos=pos,
               given_inputs=layer_cache,
               name="avg_self_attention")
-          #y = gate_layer(x, y, hparams)
           y = gate_layer(
               common_layers.layer_preprocess(
                   x, hparams, layer_collection=layer_collection),
