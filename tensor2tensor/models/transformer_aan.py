@@ -565,7 +565,6 @@ class AanTransformer(t2t_model.T2TModel):
             i,
             nonpadding=features_to_nonpadding(features, "targets"),
             pos=tf.cast(i+1, tf.float32))
-            #pos=i)
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
@@ -785,7 +784,6 @@ class AanTransformer(t2t_model.T2TModel):
             cache,
             nonpadding=features_to_nonpadding(features, "targets"),
             pos=tf.cast(i+1, tf.float32))
-            #pos=i)
 
       modality_name = hparams.name.get(
           "targets",
