@@ -187,7 +187,6 @@ class AanTransformer(t2t_model.T2TModel):
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
     self._encoder_function = transformer_encoder
     self._decoder_function = transformer_decoder
-    self._hparams.add_hparam('aan_mask', True)
 
   def encode(self, inputs, target_space, hparams, features=None, losses=None):
     """Encode transformer inputs, see transformer_encode."""
@@ -1318,7 +1317,6 @@ def average_self_attention(
     with tf.variable_scope(name, default_name="avg_self_attention",
                            values=[query_antecedent]):
         if given_inputs is not None:
-            print('dtype--->', query_antecedent.dtype, given_inputs["dp"].dtype, pos.dtype)
             x_fwd = (query_antecedent + given_inputs["dp"]) / pos
             given_inputs["dp"] += query_antecedent
             return x_fwd
@@ -1581,6 +1579,7 @@ class AanTransformerMemory(AanTransformer):
     """
     return self._beam_decode_slow(features, decode_length, beam_size,
                                   top_beams, alpha, use_tpu)
+
 
 @expert_utils.add_name_scope()
 def attention_bias_aan(inputs, inf=-1e9):
