@@ -32,7 +32,6 @@ from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import modalities
 from tensor2tensor.layers import transformer_layers
-from tensor2tensor.layers import transformer_memory
 from tensor2tensor.utils import beam_search
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
@@ -242,7 +241,7 @@ class AanTransformer(t2t_model.T2TModel):
     targets = features["targets"]
     targets_shape = common_layers.shape_list(targets)
     targets = common_layers.flatten4d3d(targets)
-    decoder_input, decoder_self_attention_bias = transformer_prepare_decoder(
+    decoder_input = transformer_prepare_decoder(
         targets, hparams, features=features)
 
     targets_raw = tf.squeeze(features["targets_raw"], [2, 3])
@@ -528,11 +527,6 @@ class AanTransformer(t2t_model.T2TModel):
             [positional_encoding_shape[0], 1, positional_encoding_shape[2]])
       return targets
 
-    decoder_self_attention_bias = (
-        common_attention.attention_bias_lower_triangle(decode_length))
-    if hparams.proximity_bias:
-      decoder_self_attention_bias += common_attention.attention_bias_proximal(
-          decode_length)
 
     def symbols_to_logits_tpu_fn(ids, i, cache):
       """Go from ids to logits for next symbol on TPU.
@@ -761,11 +755,6 @@ class AanTransformer(t2t_model.T2TModel):
         targets += positional_encoding[:, i:i + 1]
       return targets
 
-    decoder_self_attention_bias = (
-        common_attention.attention_bias_lower_triangle(decode_length))
-    if hparams.proximity_bias:
-      decoder_self_attention_bias += common_attention.attention_bias_proximal(
-          decode_length)
 
     def symbols_to_logits_fn(ids, i, cache):
       """Go from ids to logits for next symbol."""
@@ -1196,9 +1185,9 @@ def fast_decode(encoder_output,
 
 @registry.register_model
 class AanTransformerScorer(AanTransformer):
-  """Transformer model, but only scores in PREDICT mode.
+  """AanTransformer model, but only scores in PREDICT mode.
 
-  Checkpoints between Transformer and TransformerScorer are interchangeable.
+  Checkpoints between AanTransformer and AanTransformerScorer are interchangeable.
   """
 
   def __init__(self, *args, **kwargs):
@@ -1258,35 +1247,13 @@ def transformer_prepare_decoder(targets, hparams, features=None):
 
   Returns:
     decoder_input: a Tensor, bottom of decoder stack
-    decoder_self_attention_bias: a bias tensor for use in decoder self-attention
   """
-  if hparams.causal_decoder_self_attention:
-    # Causal attention.
-    if hparams.prepend_mode == "prepend_inputs_full_attention":
-      decoder_self_attention_bias = (
-          common_attention.attention_bias_prepend_inputs_full_attention(
-              common_attention.embedding_to_padding(targets)))
-    else:
-      decoder_self_attention_bias = (
-          common_attention.attention_bias_lower_triangle(
-              common_layers.shape_list(targets)[1]))
-  else:
-    # Full attention.
-    decoder_padding = common_attention.embedding_to_padding(targets)
-    decoder_self_attention_bias = (
-        common_attention.attention_bias_ignore_padding(decoder_padding))
-
   if features and "targets_segmentation" in features:
     # "Packed" dataset - keep the examples from seeing each other.
-    targets_segmentation = features["targets_segmentation"]
     targets_position = features["targets_position"]
-    decoder_self_attention_bias += common_attention.attention_bias_same_segment(
-        targets_segmentation, targets_segmentation)
   else:
     targets_position = None
-  if hparams.proximity_bias:
-    decoder_self_attention_bias += common_attention.attention_bias_proximal(
-        common_layers.shape_list(targets)[1])
+
   decoder_input = common_layers.shift_right_3d(targets)
   if hparams.pos == "timing":
     if targets_position is not None:
@@ -1299,10 +1266,7 @@ def transformer_prepare_decoder(targets, hparams, features=None):
         decoder_input, hparams.max_length, "targets_positional_embedding",
         targets_position)
 
-  if hparams.activation_dtype == "bfloat16":
-    decoder_self_attention_bias = tf.cast(decoder_self_attention_bias,
-                                          tf.bfloat16)
-  return (decoder_input, decoder_self_attention_bias)
+  return decoder_input
 
 
 def average_self_attention(
@@ -1538,48 +1502,7 @@ def transformer_decoder(decoder_input,
         x, hparams, layer_collection=layer_collection)
 
 
-@registry.register_model
-class AanTransformerMemory(AanTransformer):
-  """Transformer language model with memory across chunks."""
-
-  # TODO(kitaev): consider overriding set_mode to swap out recurrent memory when
-  # switching between training and evaluation.
-
-  def __init__(self, *args, **kwargs):
-    super(AanTransformerMemory, self).__init__(*args, **kwargs)
-
-    hparams = self._hparams
-    self.recurrent_memory_by_layer = {}
-    for layer in range(hparams.num_decoder_layers or hparams.num_hidden_layers):
-      layer_name = "layer_%d" % layer
-      if hparams.memory_type == "neural_memory":
-        memory = transformer_memory.TransformerMemory(
-            batch_size=int(hparams.batch_size / hparams.max_length),
-            key_depth=hparams.hidden_size,
-            val_depth=hparams.hidden_size,
-            memory_size=hparams.split_targets_chunk_length,
-            sharpen_factor=1.,
-            name=layer_name + "/recurrent_memory")
-      elif hparams.memory_type == "transformer_xl":
-        memory = transformer_memory.RecentTokensMemory(
-            layer_name + "/recurrent_memory", hparams)
-      else:
-        raise ValueError("Unsupported memory type: %s" % hparams.memory_type)
-      self.recurrent_memory_by_layer[layer_name] = memory
-
-  @property
-  def has_input(self):
-    if hasattr(self._hparams, "unconditional") and self._hparams.unconditional:
-      return False
-    return super(AanTransformerMemory, self).has_input
-
-  def _beam_decode(self, features, decode_length, beam_size, top_beams, alpha,
-                   use_tpu=False):
-    """Overriding beam search because for now only the slow version works with
-    memory
-    """
-    return self._beam_decode_slow(features, decode_length, beam_size,
-                                  top_beams, alpha, use_tpu)
+"""Any standard transformer hparams can be accepted here with only one more param "aan_mask" added. """
 
 
 @registry.register_hparams
@@ -1588,3 +1511,113 @@ def aan_transformer_base():
   hparams = transformer_base_v3()
   hparams.aan_mask = False
   return hparams
+
+@registry.register_hparams
+def aan_transformer_big():
+  """HParams for transformer big model on WMT."""
+  hparams = aan_transformer_base()
+  hparams.hidden_size = 1024
+  hparams.filter_size = 4096
+  # Reduce batch size to 2048 from 4096 to be able to train the model on a GPU
+  # with 12 GB memory. For example, NVIDIA TITAN V GPU.
+  hparams.batch_size = 2048
+  hparams.num_heads = 16
+  hparams.layer_prepostprocess_dropout = 0.3
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_tall():
+  """Hparams for transformer on LM for pretraining/finetuning/mixing."""
+  hparams = aan_transformer_base()
+  hparams.batch_size = 2048
+  hparams.hidden_size = 768
+  hparams.filter_size = 3072
+  hparams.num_hidden_layers = 12
+  hparams.num_heads = 12
+  hparams.label_smoothing = 0.0
+  hparams.max_length = 1024
+  hparams.eval_drop_long_sequences = True
+  hparams.multiproblem_mixing_schedule = "pretrain"
+  hparams.multiproblem_vocab_size = 65536
+  hparams.clip_grad_norm = 1.0
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_tall_finetune_uniencdec():
+  """Fine-tune CNN/DM with a unidirectional encoder and decoder."""
+  hparams = aan_transformer_tall()
+  hparams.max_input_seq_length = 750
+  hparams.max_target_seq_length = 100
+  hparams.optimizer = "true_adam"
+  hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
+  hparams.learning_rate_decay_steps = 80000
+  hparams.learning_rate_constant = 5e-5
+  hparams.learning_rate_warmup_steps = 100
+  hparams.unidirectional_encoder = True
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_tall_train_uniencdec():
+  """Train CNN/DM with a unidirectional encoder and decoder."""
+  hparams = aan_transformer_tall()
+  hparams.max_input_seq_length = 750
+  hparams.max_target_seq_length = 100
+  hparams.optimizer = "true_adam"
+  hparams.learning_rate_schedule = ("linear_warmup*constant*cosdecay")
+  hparams.learning_rate_decay_steps = 150000
+  hparams.learning_rate_constant = 2e-4
+  hparams.unidirectional_encoder = True
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_tall_big():
+  """Hparams for transformer on LM+MNLI."""
+  hparams = aan_transformer_tall()
+  hparams.num_hidden_layers = 18
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_big_single_gpu():
+  """HParams for transformer big model for single GPU."""
+  hparams = aan_transformer_big()
+  hparams.layer_prepostprocess_dropout = 0.1
+  hparams.learning_rate_warmup_steps = 16000
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_base_single_gpu():
+  """HParams for transformer base model for single GPU."""
+  hparams = aan_transformer_base()
+  hparams.batch_size = 1024
+  hparams.learning_rate_schedule = "constant*linear_warmup*rsqrt_decay"
+  hparams.learning_rate_constant = 0.1
+  hparams.learning_rate_warmup_steps = 16000
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_tiny():
+  hparams = aan_transformer_base()
+  hparams.num_hidden_layers = 2
+  hparams.hidden_size = 128
+  hparams.filter_size = 512
+  hparams.num_heads = 4
+  return hparams
+
+
+@registry.register_hparams
+def aan_transformer_small():
+  hparams = aan_transformer_base()
+  hparams.num_hidden_layers = 2
+  hparams.hidden_size = 256
+  hparams.filter_size = 1024
+  hparams.num_heads = 4
+  return hparams
+
+
