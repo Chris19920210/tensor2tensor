@@ -508,7 +508,9 @@ class Problem(object):
 
   def get_hparams(self, model_hparams=None):
     """Returns problem_hparams."""
+    print('======>>>>> get hpparams')
     if self._hparams is not None:
+      print("directly return=====<<<<<<")
       return self._hparams
 
     if model_hparams is None:

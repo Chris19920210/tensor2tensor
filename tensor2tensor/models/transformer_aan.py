@@ -1509,7 +1509,7 @@ def transformer_decoder(decoder_input,
 def aan_transformer_base():
   """Base parameters for Transformer model."""
   hparams = transformer_base_v3()
-  hparams.aan_mask = False
+  hparams.add_hparam('aan_mask', True)
   return hparams
 
 @registry.register_hparams
