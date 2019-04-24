@@ -20,17 +20,17 @@ CODE_BASE=/home/wudong/t2t_aan/tensor2tensor
 export CUDA_VISIBLE_DEVICES=3
 export PYTHONPATH=$USR_DIR:$PYTHONPATH
 
-#t2t-decoder \
-#  --data_dir=$DATA_DIR \
-#  --problem=$PROBLEM \
-#  --model=$MODEL \
-#  --t2t_usr_dir=$USR_DIR \
-#  --hparams_set=$HPARAMS \
-#  --output_dir=$TRAIN_DIR \
-#  --decode_hparams="beam_size=$BEAM_SIZE,alpha=$ALPHA,batch_size=10" \
-#  --decode_from_file=$SRC_TEXT \
-#  --decode_to_file=$INFER_RESULT
+t2t-decoder \
+  --data_dir=$DATA_DIR \
+  --problem=$PROBLEM \
+  --model=$MODEL \
+  --t2t_usr_dir=$USR_DIR \
+  --hparams_set=$HPARAMS \
+  --output_dir=$TRAIN_DIR \
+  --decode_hparams="beam_size=$BEAM_SIZE,alpha=$ALPHA,batch_size=10" \
+  --decode_from_file=$SRC_TEXT \
+  --decode_to_file=$INFER_RESULT
 
 python $CODE_BASE/ai_tools/generate_sgm.py --src-path=$SRC_TEXT --tgt-path=$REF_TEXT --infer-path=$INFER_RESULT --save-dir=$RESULT_DIR
 
-python $CODE_BASE/ai_tools/mt-score-main.py -rs $RESULT_DIR/ref.sgm -hs $RESULT_DIR/hyp.sgm -ss $RESULT_DIR/src.sgm --id demo1 | tee $RESULT_DIR/$HPARAMS-score
+python $CODE_BASE/ai_tools/mt-score-main.py -rs $RESULT_DIR/ref.sgm -hs $RESULT_DIR/hyp.sgm -ss $RESULT_DIR/src.sgm --id $PROBLEM-$MODEL-$HPARAMS | tee $RESULT_DIR/$HPARAMS-score
