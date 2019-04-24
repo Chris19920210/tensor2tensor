@@ -1,0 +1,21 @@
+MT evaluation scorer began on 2019 Apr 24 at 13:36:34
+command line:  /home/wudong/t2t_aan/tensor2tensor/ai_tools/mteval-v11b.pl -s /home/wudong/t2t_aan/translatespm_enzh_ai32k/aan_transformer-res/src.sgm -r work-translatespm_enzh_ai32k-aan_transformer-aan_transformer_base/ref.seg.sgm -t work-translatespm_enzh_ai32k-aan_transformer-aan_transformer_base/hyp.seg.sgm -c
+  Evaluation of en-to-zh translation using:
+    src set "newsdev2017" (1 docs, 8000 segs)
+    ref set "newsdev2017" (0 refs)
+    tst set "newsdev2017" (0 systems)
+
+
+# ------------------------------------------------------------------------
+
+Individual N-gram scoring
+        1-gram   2-gram   3-gram   4-gram   5-gram   6-gram   7-gram   8-gram   9-gram
+        ------   ------   ------   ------   ------   ------   ------   ------   ------
+
+
+# ------------------------------------------------------------------------
+Cumulative N-gram scoring
+        1-gram   2-gram   3-gram   4-gram   5-gram   6-gram   7-gram   8-gram   9-gram
+        ------   ------   ------   ------   ------   ------   ------   ------   ------
+
+MT evaluation scorer ended on 2019 Apr 24 at 13:36:35
