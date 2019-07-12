@@ -20,7 +20,9 @@ from __future__ import division
 from __future__ import print_function
 
 import gym
+import gym.wrappers
 import numpy as np
+from PIL import Image
 import tensorflow as tf
 
 
@@ -82,23 +84,55 @@ class MaxAndSkipEnv(gym.Wrapper):
 class RenderedEnv(gym.Wrapper):
   """Simple Env wrapper to override observations with rendered rgb values."""
 
-  def __init__(self, env, mode="rgb_array", low=0, high=255):
+  def __init__(self,
+               env,
+               mode="rgb_array",
+               low=0,
+               high=255,
+               resize_to=None,
+               output_dtype=None):
     gym.Wrapper.__init__(self, env)
     # Get a sample frame to correctly set observation space
     self.mode = mode
     sample_frame = self.render(mode=self.mode)
     assert sample_frame is not None
-    self.observation_space = gym.spaces.Box(
-        low=low, high=high, shape=sample_frame.shape, dtype=sample_frame.dtype)
+    self.should_resize = False
+    self.output_dtype = output_dtype
+    if resize_to is None:
+      self.observation_space = gym.spaces.Box(
+          low=low,
+          high=high,
+          shape=sample_frame.shape,
+          dtype=sample_frame.dtype)
+    else:
+      assert len(resize_to) == 2
+      self.should_resize = True
+      num_channels = sample_frame.shape[-1]
+      self.observation_space = gym.spaces.Box(
+          low=low,
+          high=high,
+          shape=list(resize_to) + [num_channels],
+          dtype=sample_frame.dtype)
+
+  def _maybe_resize(self, obs):
+    if not self.should_resize:
+      return obs
+    height, width = self.observation_space.shape[:2]
+    img = Image.fromarray(obs)
+    img = img.resize([width, height], resample=Image.ANTIALIAS)
+    if self.output_dtype is None:
+      return np.array(img)
+    return np.array(img).astype(self.output_dtype)
 
   def step(self, action):
     _, reward, done, info = self.env.step(action)
-    obs = self.env.render(mode=self.mode)
+    obs = self._maybe_resize(self.env.render(mode=self.mode))
     return obs, reward, done, info
 
   def reset(self, **kwargs):
     self.env.reset(**kwargs)
-    return self.env.render(mode=self.mode)
+    obs = self._maybe_resize(self.env.render(mode=self.mode))
+    return obs
 
 
 def remove_time_limit_wrapper(env):
@@ -124,7 +158,7 @@ def remove_time_limit_wrapper(env):
 
 
 def gym_env_wrapper(env, rl_env_max_episode_steps, maxskip_env, rendered_env,
-                    sticky_actions):
+                    rendered_env_resize_to, sticky_actions, output_dtype):
   """Wraps a gym environment. see make_gym_env for details."""
   # rl_env_max_episode_steps is None or int.
   assert ((not rl_env_max_episode_steps) or
@@ -143,11 +177,12 @@ def gym_env_wrapper(env, rl_env_max_episode_steps, maxskip_env, rendered_env,
     env = MaxAndSkipEnv(env)  # pylint: disable=redefined-variable-type
 
   if rendered_env:
-    env = RenderedEnv(env)
+    env = RenderedEnv(
+        env, resize_to=rendered_env_resize_to, output_dtype=output_dtype)
 
-  if wrap_with_time_limit:
-    env = gym.wrappers.TimeLimit(env,
-                                 max_episode_steps=rl_env_max_episode_steps)
+  if wrap_with_time_limit and rl_env_max_episode_steps is not None:
+    env = gym.wrappers.TimeLimit(
+        env, max_episode_steps=rl_env_max_episode_steps)
   return env
 
 
@@ -155,7 +190,9 @@ def make_gym_env(name,
                  rl_env_max_episode_steps=-1,
                  maxskip_env=False,
                  rendered_env=False,
-                 sticky_actions=False):
+                 rendered_env_resize_to=None,
+                 sticky_actions=False,
+                 output_dtype=None):
   """Create a gym env optionally with a time limit and maxskip wrapper.
 
   NOTE: The returned env may already be wrapped with TimeLimit!
@@ -168,14 +205,20 @@ def make_gym_env(name,
     maxskip_env: whether to also use MaxAndSkip wrapper before time limit.
     rendered_env: whether to force render for observations. Use this for
       environments that are not natively rendering the scene for observations.
+    rendered_env_resize_to: a list of [height, width] to change the original
+      resolution of the native environment render.
     sticky_actions: whether to use sticky_actions before MaxAndSkip wrapper.
+    output_dtype: numpy datatype that we want the observation to be in, if None
+      this defaults to the env's observation dtype. Useful for TPUs since they
+      don't support uint8 which is a default observation type for a lot of envs.
 
   Returns:
     An instance of `gym.Env` or `gym.Wrapper`.
   """
   env = gym.make(name)
   return gym_env_wrapper(env, rl_env_max_episode_steps, maxskip_env,
-                         rendered_env, sticky_actions)
+                         rendered_env, rendered_env_resize_to, sticky_actions,
+                         output_dtype)
 
 
 def register_gym_env(class_entry_point, version="v0", kwargs=None):

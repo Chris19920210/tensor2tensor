@@ -19,11 +19,13 @@ from __future__ import division
 from __future__ import print_function
 
 import importlib
+import six
 from six.moves import range  # pylint: disable=redefined-builtin
 
 MODULES = [
     "tensor2tensor.data_generators.algorithmic",
     "tensor2tensor.data_generators.algorithmic_math",
+    "tensor2tensor.data_generators.algorithmic_math_deepmind",
     "tensor2tensor.data_generators.algorithmic_math_two_variables",
     "tensor2tensor.data_generators.allen_brain",
     "tensor2tensor.data_generators.audio",
@@ -52,6 +54,7 @@ MODULES = [
     "tensor2tensor.data_generators.lm1b_imdb",
     "tensor2tensor.data_generators.lm1b_mnli",
     "tensor2tensor.data_generators.mnist",
+    "tensor2tensor.data_generators.moving_mnist",
     "tensor2tensor.data_generators.mrpc",
     "tensor2tensor.data_generators.mscoco",
     "tensor2tensor.data_generators.multinli",
@@ -91,6 +94,8 @@ MODULES = [
     "tensor2tensor.data_generators.wikitext103",
     "tensor2tensor.data_generators.wsj_parsing",
     "tensor2tensor.data_generators.wnli",
+    "tensor2tensor.data_generators.yelp_polarity",
+    "tensor2tensor.data_generators.yelp_full",
     "tensor2tensor.envs.mujoco_problems",
     "tensor2tensor.envs.tic_tac_toe_env_problem",
 ]

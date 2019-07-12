@@ -22,8 +22,8 @@ import six
 
 
 from tensor2tensor.data_generators import gym_env
+from tensor2tensor.utils import hparam
 from tensor2tensor.utils import registry
-from tensor2tensor.utils.hparam import HParams
 
 import tensorflow as tf
 
@@ -45,7 +45,7 @@ HP_SCOPES = ["loop", "model", "ppo"]
 
 
 def _rlmb_base():
-  return HParams(
+  return hparam.HParams(
       epochs=15,
       # Total frames used for training. This will be distributed evenly across
       # hparams.epochs.
@@ -211,6 +211,41 @@ def rlmb_dqn_base():
 
 
 @registry.register_hparams
+def rlmb_dqn_guess1():
+  """DQN guess1 params."""
+  hparams = rlmb_dqn_base()
+  hparams.set_hparam("base_algo_params", "dqn_guess1_params")
+  # At the moment no other option for evaluation, so we want long rollouts to
+  # not bias scores.
+  hparams.set_hparam("eval_rl_env_max_episode_steps", 5000)
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_dqn_guess1_rainbow():
+  """Rainbow rlmb_dqn guess1 params."""
+  hparams = rlmb_dqn_guess1()
+  hparams.set_hparam("base_algo_params", "dqn_guess1_rainbow_params")
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_dqn_guess1_2m_replay_buffer():
+  """DQN guess1 params, 2M replay buffer."""
+  hparams = rlmb_dqn_guess1()
+  hparams.set_hparam("base_algo_params", "dqn_2m_replay_buffer_params")
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_dqn_guess1_10m_replay_buffer():
+  """DQN guess1 params, 10M replay buffer."""
+  hparams = rlmb_dqn_guess1()
+  hparams.set_hparam("base_algo_params", "dqn_10m_replay_buffer_params")
+  return hparams
+
+
+@registry.register_hparams
 def rlmb_basetest():
   """Base setting but quicker with only 2 epochs."""
   hparams = rlmb_base()
@@ -325,6 +360,82 @@ def rlmb_base_stochastic_discrete():
 
 
 @registry.register_hparams
+def rlmb_base_stochastic_discrete_sticky_actions():
+  """Base setting, stochastic discrete model with sticky action environment."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.sticky_actions = True
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_20k():
+  """Base setting with stochastic discrete model with 20k steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  # Our num_real_env_frames should be divisible by real_ppo_epoch_length*epochs
+  # Here we decrease epochs to 6 and make this number 16*200*6.
+  hparams.num_real_env_frames = 19200
+  hparams.epochs = 6
+  hparams.ppo_epochs_num = 2000  # Increase PPO steps as we have less epochs.
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_50k():
+  """Base setting with stochastic discrete model with 50k steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.num_real_env_frames = 48000
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_75k_model_steps():
+  """Base setting with stochastic discrete model with 75k WM steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.model_train_steps = 15000 * 5
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_20k_model_steps():
+  """Base SD setting with 20k WM steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.model_train_steps = 20000
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_30k_model_steps():
+  """Base SD setting with 20k WM steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.model_train_steps = 30000
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_200k():
+  """Base setting with stochastic discrete model with 200k steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.num_real_env_frames = 96000 * 2
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_500k():
+  """Base setting with stochastic discrete model with 500k steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.num_real_env_frames = 96000 * 5
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base_stochastic_discrete_1m():
+  """Base setting with stochastic discrete model with 1M steps."""
+  hparams = rlmb_base_stochastic_discrete()
+  hparams.num_real_env_frames = 96000 * 10
+  return hparams
+
+
+@registry.register_hparams
 def rlmb_base_stochastic_discrete_param_sharing():
   """Base setting with stochastic discrete model with parameter sharing."""
   hparams = rlmb_base_stochastic_discrete()
@@ -406,18 +517,18 @@ def rlmb_long_stochastic_discrete_gamma90():
 
 
 @registry.register_hparams
-def rlmb_long_stochastic_discrete_3epochs():
+def rlmb_base_stochastic_discrete_3epochs():
   """Long setting with stochastic discrete model, changed epochs."""
-  hparams = rlmb_long_stochastic_discrete()
+  hparams = rlmb_base_stochastic_discrete()
   hparams.epochs = 3
   hparams.ppo_epochs_num = 2000
   return hparams
 
 
 @registry.register_hparams
-def rlmb_long_stochastic_discrete_1epoch():
+def rlmb_base_stochastic_discrete_1epoch():
   """Long setting with stochastic discrete model, changed epochs."""
-  hparams = rlmb_long_stochastic_discrete()
+  hparams = rlmb_base_stochastic_discrete()
   hparams.epochs = 1
   hparams.ppo_epochs_num = 3000
   return hparams
@@ -541,6 +652,7 @@ def rlmb_dqn_tiny():
   hparams = rlmb_dqn_base()
   hparams = hparams.override_from_dict(_rlmb_tiny_overrides())
   update_hparams(hparams, dict(
+      base_algo_params="dqn_guess1_params",
       simulated_rollout_length=2,
       dqn_time_limit=2,
       dqn_num_frames=128,
@@ -820,7 +932,7 @@ def merge_unscoped_hparams(scopes_and_hparams):
       scoped_key = "%s.%s" % (scope, key)
       merged_values[scoped_key] = value
 
-  return HParams(**merged_values)
+  return hparam.HParams(**merged_values)
 
 
 def split_scoped_hparams(scopes, merged_hparams):
@@ -833,7 +945,7 @@ def split_scoped_hparams(scopes, merged_hparams):
     split_values[scope][key] = value
 
   return [
-      HParams(**split_values[scope]) for scope in scopes
+      hparam.HParams(**split_values[scope]) for scope in scopes
   ]
 
 
@@ -887,7 +999,7 @@ def dynamic_register_hparams(name, hparams):
 
   @registry.register_hparams(name)
   def new_hparams_set():
-    return HParams(**hparams.values())
+    return hparam.HParams(**hparams.values())
 
   return new_hparams_set
 

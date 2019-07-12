@@ -23,6 +23,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import multiprocessing.pool
+import time
+
 import gym
 from gym.core import Env
 import numpy as np
@@ -128,7 +131,10 @@ class EnvProblem(Env, problem.Problem):
                base_env_name=None,
                batch_size=None,
                env_wrapper_fn=None,
-               reward_range=(-np.inf, np.inf)):
+               reward_range=(-np.inf, np.inf),
+               discrete_rewards=True,
+               parallelism=1,
+               **env_kwargs):
     """Initializes this class by creating the envs and managing trajectories.
 
     Args:
@@ -141,6 +147,11 @@ class EnvProblem(Env, problem.Problem):
       reward_range: (tuple(number, number)) the first element is the minimum
         reward and the second is the maximum reward, used to clip and process
         the raw reward in `process_rewards`.
+      discrete_rewards: (bool) whether to round the rewards to the nearest
+        integer.
+      parallelism: (int) If this is greater than one then we run the envs in
+        parallel using multi-threading.
+      **env_kwargs: (dict) Additional kwargs to pass to the environments.
     """
 
     # Call the super's ctor.
@@ -161,12 +172,17 @@ class EnvProblem(Env, problem.Problem):
     # in `process_rewards`.
     self._reward_range = reward_range
 
+    # If set, we discretize the rewards and treat them as integers.
+    self._discrete_rewards = discrete_rewards
+
     # Initialize the environment(s).
 
     # This can either be a list of environments of len `batch_size` or this can
     # be a Neural Network, in which case it will be fed input with first
     # dimension = `batch_size`.
     self._envs = None
+    self._pool = None
+    self._parallelism = parallelism
 
     self._observation_space = None
     self._action_space = None
@@ -180,7 +196,7 @@ class EnvProblem(Env, problem.Problem):
     self._env_wrapper_fn = env_wrapper_fn
 
     if batch_size is not None:
-      self.initialize(batch_size=batch_size)
+      self.initialize(batch_size=batch_size, **env_kwargs)
 
   @property
   def batch_size(self):
@@ -245,7 +261,7 @@ class EnvProblem(Env, problem.Problem):
     assert self._reward_range is not None
     assert self._trajectories is not None
 
-  def initialize_environments(self, batch_size=1):
+  def initialize_environments(self, batch_size=1, parallelism=1, **env_kwargs):
     """Initializes the environments and trajectories.
 
     Subclasses can override this if they don't want a default implementation
@@ -254,11 +270,18 @@ class EnvProblem(Env, problem.Problem):
 
     Args:
       batch_size: (int) Number of `self.base_env_name` envs to initialize.
+      parallelism: (int) If this is greater than one then we run the envs in
+        parallel using multi-threading.
+      **env_kwargs: (dict) Kwargs to pass to gym.make.
     """
     assert batch_size >= 1
     self._batch_size = batch_size
 
-    self._envs = [gym.make(self.base_env_name) for _ in range(batch_size)]
+    self._envs = [
+        gym.make(self.base_env_name, **env_kwargs) for _ in range(batch_size)
+    ]
+    self._parallelism = parallelism
+    self._pool = multiprocessing.pool.ThreadPool(self._parallelism)
     if self._env_wrapper_fn is not None:
       self._envs = list(map(self._env_wrapper_fn, self._envs))
 
@@ -350,7 +373,7 @@ class EnvProblem(Env, problem.Problem):
     return (min_reward != -np.inf) and (max_reward != np.inf)
 
   def process_rewards(self, rewards):
-    """Clips, rounds, and changes to integer type.
+    """Clips the rewards, optionally rounds them and casts to integer.
 
     Args:
       rewards: numpy array of raw (float) rewards.
@@ -363,8 +386,10 @@ class EnvProblem(Env, problem.Problem):
 
     # Clips at min and max reward.
     rewards = np.clip(rewards, min_reward, max_reward)
-    # Round to (nearest) int and convert to integral type.
-    rewards = np.around(rewards, decimals=0).astype(np.int64)
+
+    if self._discrete_rewards:
+      # Round to (nearest) int and convert to integral type.
+      rewards = np.around(rewards, decimals=0).astype(np.int64)
     return rewards
 
   @property
@@ -388,10 +413,10 @@ class EnvProblem(Env, problem.Problem):
     # Pre-conditions: reward range is finite.
     #               : processed rewards are discrete.
     if not self.is_reward_range_finite:
-      tf.logging.error("Infinite reward range, `num_rewards returning None`")
+      tf.logging.warn("Infinite reward range, `num_rewards returning None`")
       return None
     if not self.is_processed_rewards_discrete:
-      tf.logging.error(
+      tf.logging.warn(
           "Processed rewards are not discrete, `num_rewards` returning None")
       return None
 
@@ -471,21 +496,35 @@ class EnvProblem(Env, problem.Problem):
     # rest being the dimensionality of the observation.
     return np.stack([self._envs[index].reset() for index in indices])
 
+  def truncate(self, indices=None, num_to_keep=1):
+    """Truncates trajectories at the specified indices."""
+
+    if indices is None:
+      indices = np.arange(self.batch_size)
+
+    self.trajectories.truncate_trajectories(indices, num_to_keep=num_to_keep)
+
   def reset(self, indices=None):
     """Resets environments at given indices.
 
     Subclasses should override _reset to do the actual reset if something other
     than the default implementation is desired.
 
+    NOTE: With `indices` as None the recorded trajectories are also erased since
+        the expecation is that we want to re-use the whole env class from
+        scratch.
+
     Args:
-      indices: Indices of environments to reset. If None all envs are reset.
+      indices: Indices of environments to reset. If None all envs are reset as
+          well as trajectories are erased.
 
     Returns:
       Batch of initial observations of reset environments.
     """
 
     if indices is None:
-      indices = np.arange(self.trajectories.batch_size)
+      self.trajectories.reset_batch_trajectories()
+      indices = np.arange(self.batch_size)
 
     # If this is empty (not None) then don't do anything, no env was done.
     if indices.size == 0:
@@ -497,9 +536,27 @@ class EnvProblem(Env, problem.Problem):
     processed_observations = self.process_observations(observations)
 
     # Record history.
-    self.trajectories.reset(indices, observations)
+    self.trajectories.reset(indices, processed_observations)
 
     return processed_observations
+
+  def render(self, mode="human", indices=None):
+    """Calls render with the given mode on the specified indices.
+
+    Args:
+      mode: rendering mode.
+      indices: array of indices, calls render on everything if indices is None.
+
+    Returns:
+      a list of return values from the environments rendered.
+    """
+
+    if indices is None:
+      indices = np.arange(self.batch_size)
+    ret_vals = []
+    for index in indices:
+      ret_vals.append(self._envs[index].render(mode=mode))
+    return ret_vals
 
   def _step(self, actions):
     """Takes a step in all environments, shouldn't pre-process or record.
@@ -518,20 +575,25 @@ class EnvProblem(Env, problem.Problem):
     #               : len(actions) == len(self._envs)
     self.assert_common_preconditions()
     assert len(actions) == len(self._envs)
+    assert self.batch_size == len(actions)
 
-    observations = []
-    rewards = []
-    dones = []
-    infos = []
+    observations = [None] * self.batch_size
+    rewards = [None] * self.batch_size
+    dones = [None] * self.batch_size
+    infos = [{} for _ in range(self.batch_size)]
 
-    # Take steps in all environments.
-    for env, action in zip(self._envs, actions):
-      observation, reward, done, info = env.step(action)
+    def apply_step(i):
+      t1 = time.time()
+      observations[i], rewards[i], dones[i], infos[i] = self._envs[i].step(
+          actions[i])
+      t2 = time.time()
+      infos[i]["__bare_env_run_time__"] = t2 - t1
 
-      observations.append(observation)
-      rewards.append(reward)
-      dones.append(done)
-      infos.append(info)
+    if self._parallelism > 1:
+      self._pool.map(apply_step, range(self.batch_size))
+    else:
+      for i in range(self.batch_size):
+        apply_step(i)
 
     # Convert each list (observations, rewards, ...) into np.array and return a
     # tuple.
@@ -731,7 +793,7 @@ class EnvProblem(Env, problem.Problem):
 
     # Write the completed data into these files
 
-    num_completed_trajectories = len(self.trajectories.completed_trajectories)
+    num_completed_trajectories = self.trajectories.num_completed_trajectories
     num_shards = len(files_list)
     if num_completed_trajectories < num_shards:
       tf.logging.warning(

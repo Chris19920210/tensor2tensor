@@ -13,29 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""gin-configurable optimizers and learning rate functions."""
+"""Tests for MLP."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import gin
+from absl.testing import absltest
+from tensor2tensor.trax import backend
+from tensor2tensor.trax import layers as tl
+from tensor2tensor.trax.models import mlp
 
-from jax.experimental import optimizers as opt
+
+class MLPTest(absltest.TestCase):
+
+  def test_mlp_forward_shape(self):
+    """Run the MLP model forward and check output shape."""
+    input_shape = (3, 28, 28, 1)
+    model = mlp.MLP(d_hidden=32, n_output_classes=10)
+    final_shape = tl.check_shape_agreement(model, input_shape)
+    self.assertEqual((3, 10), final_shape)
 
 
-def opt_configure(*args, **kwargs):
-  kwargs["module"] = "trax.optimizers"
-  return gin.external_configurable(*args, **kwargs)
-
-# Optimizers
-sgd = opt_configure(opt.sgd)
-adam = opt_configure(opt.adam)
-momentum = opt_configure(opt.momentum)
-rmsprop = opt_configure(opt.rmsprop)
-
-# Learning rates
-constant = opt_configure(opt.constant)
-exponential_decay = opt_configure(opt.exponential_decay)
-inverse_time_decay = opt_configure(opt.inverse_time_decay)
-piecewise_constant = opt_configure(opt.piecewise_constant)
+if __name__ == '__main__':
+  absltest.main()

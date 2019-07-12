@@ -38,7 +38,9 @@ class ReacherEnvProblem(rendered_env_problem.RenderedEnvProblem):
             "rl_env_max_episode_steps": -1,
             "maxskip_env": False,
             "rendered_env": True,
-            "sticky_actions": False
+            "rendered_env_resize_to": None,  # Do not resize frames
+            "sticky_actions": False,
+            "output_dtype": None,
         })
     super(ReacherEnvProblem, self).__init__(
         base_env_name=base_env_name, env_wrapper_fn=wrapper_fn)

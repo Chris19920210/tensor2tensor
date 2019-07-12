@@ -27,8 +27,7 @@ from __future__ import division
 from __future__ import print_function
 
 import gin
-
-import jax.numpy as np
+from tensor2tensor.trax.backend import numpy as np
 
 
 # A dictionary to memoize results of the MultifactorSchedule below.
@@ -41,21 +40,26 @@ _memoized_multifactor_schedules = {}
 
 @gin.configurable(blacklist=["history"])
 def MultifactorSchedule(history=None,
-                        factors="constant * linear_warmup * rsqrt_decay",
+                        factors="constant * linear_warmup",
                         constant=0.1,
-                        warmup_steps=100):
+                        warmup_steps=400,
+                        decay_factor=0.5,
+                        steps_per_decay=20000):
   """Factor-based learning rate schedule.
 
   Interprets factors in the factors string which can consist of:
   * constant: interpreted as the constant value,
   * linear_warmup: interpreted as linear warmup until warmup_steps,
   * rsqrt_decay: divide by square root of max(step, warmup_steps)
+  * decay_every: Every k steps decay the learning rate by decay_factor.
 
   Args:
     history: the history of training and evaluation (History object).
     factors: a string with factors separated by "*" that defines the schedule.
     constant: float, the starting constant for the learning rate schedule.
     warmup_steps: how many steps to warm up for in the warmup schedule.
+    decay_factor: The amount to decay the learning rate by.
+    steps_per_decay: How often to decay the learning rate.
 
   Returns:
     a function learning_rate(step): float -> float, the step-dependent lr.
@@ -78,6 +82,8 @@ def MultifactorSchedule(history=None,
         ret *= np.minimum(1.0, step / warmup_steps)
       elif name == "rsqrt_decay":
         ret /= np.sqrt(np.maximum(step, warmup_steps))
+      elif name == "decay_every":
+        ret *= (decay_factor ** (step//steps_per_decay))
       else:
         raise ValueError("Unknown factor %s." % name)
     return ret

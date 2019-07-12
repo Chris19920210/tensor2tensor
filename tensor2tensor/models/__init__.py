@@ -45,6 +45,8 @@ from tensor2tensor.models import vanilla_gan
 from tensor2tensor.models import xception
 from tensor2tensor.models import transformer_aan
 
+from tensor2tensor.models.neural_architecture_search import nas_model
+
 from tensor2tensor.models.research import adafactor_experiments
 from tensor2tensor.models.research import aligned
 from tensor2tensor.models.research import attention_lm
@@ -56,6 +58,7 @@ from tensor2tensor.models.research import glow
 from tensor2tensor.models.research import lm_experiments
 from tensor2tensor.models.research import moe_experiments
 from tensor2tensor.models.research import multiquery_paper
+from tensor2tensor.models.research import neural_stack
 from tensor2tensor.models.research import rl
 from tensor2tensor.models.research import similarity_transformer
 from tensor2tensor.models.research import super_lm

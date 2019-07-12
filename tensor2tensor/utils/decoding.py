@@ -33,9 +33,9 @@ from six.moves import input  # pylint: disable=redefined-builtin
 from tensor2tensor.data_generators import problem as problem_lib
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.data_generators import text_problems
+from tensor2tensor.utils import hparam
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
-from tensor2tensor.utils.hparam import HParams
 import tensorflow as tf
 
 FLAGS = tf.flags.FLAGS
@@ -46,7 +46,7 @@ IMAGE_DECODE_LENGTH = 100
 
 def decode_hparams(overrides=""):
   """Hyperparameters for decoding."""
-  hp = HParams(
+  hp = hparam.HParams(
       save_images=False,
       log_results=True,
       extra_length=100,
@@ -65,7 +65,8 @@ def decode_hparams(overrides=""):
       identity_output=False,
       num_samples=-1,  # Number of examples to decode.
       delimiter="\n",
-      decode_to_file=None,  # str. Prefix for filename to write decodings to.
+      decode_to_file="",  # str. Prefix for filename to write decodings to.
+      decode_reference="",  # str. Filename to read references from.
       decode_in_memory=False,
       # How much decode should wait for the next checkpoint
       decode_timeout_mins=240,
@@ -110,7 +111,8 @@ def log_decode_results(inputs,
                        save_images=False,
                        output_dir=None,
                        identity_output=False,
-                       log_results=True):
+                       log_results=True,
+                       skip_eos_postprocess=False):
   """Log inference results."""
 
   # TODO(lukaszkaiser) refactor this into feature_encoder
@@ -132,7 +134,7 @@ def log_decode_results(inputs,
   is_image = "image" in problem_name
   is_text2class = isinstance(registry.problem(problem_name),
                              text_problems.Text2ClassProblem)
-  skip_eos_postprocess = is_image or is_text2class
+  skip_eos_postprocess = is_image or is_text2class or skip_eos_postprocess
 
   decoded_inputs = None
   if is_image and save_images:
@@ -255,9 +257,9 @@ def decode_once(estimator,
     estimator: tf.estimator.Estimator instance. Used to generate encoded
       predictions.
     problem_name: str. Name of problem.
-    hparams: tf.HParams instance. HParams for model training.
+    hparams: HParams instance. HParams for model training.
     infer_input_fn: zero-arg function. Input function for estimator.
-    decode_hp: tf.HParams instance. See decode_hparams() above.
+    decode_hp: HParams instance. See decode_hparams() above.
     decode_to_file: str. Prefix for filenames. Used to generated filenames to
       which decoded predictions are written.
     output_dir: str. Output directory. Only used for writing images.
@@ -356,7 +358,8 @@ def decode_once(estimator,
           output_dir=output_dir,
           identity_output=decode_hp.identity_output,
           targets=targets,
-          log_results=log_results)
+          log_results=log_results,
+          skip_eos_postprocess=decode_hp.skip_eos_postprocess)
       decoded_outputs.append(decoded)
     t3 = time.time()
     print("===>>> 2", t3 - t2, inputs.shape, targets.shape, outputs.shape)
@@ -490,7 +493,8 @@ def decode_from_file(estimator,
             None,
             inputs_vocab,
             targets_vocab,
-            log_results=decode_hp.log_results)
+            log_results=decode_hp.log_results,
+            skip_eos_postprocess=decode_hp.skip_eos_postprocess)
         beam_decodes.append(decoded_outputs)
         if decode_hp.write_beam_scores:
           beam_scores.append(score)
@@ -509,7 +513,8 @@ def decode_from_file(estimator,
           None,
           inputs_vocab,
           targets_vocab,
-          log_results=decode_hp.log_results)
+          log_results=decode_hp.log_results,
+          skip_eos_postprocess=decode_hp.skip_eos_postprocess)
       decodes.append(decoded_outputs)
     total_time_per_step += elapsed_time
     total_cnt += result["outputs"].shape[-1]

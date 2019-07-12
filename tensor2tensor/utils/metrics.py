@@ -51,11 +51,13 @@ class Metrics(object):
   ROUGE_2_F = "rouge_2_fscore"
   ROUGE_L_F = "rouge_L_fscore"
   EDIT_DISTANCE = "edit_distance"
+  PREFIX_ACCURACY = "prefix_accuracy"
   WORD_ERROR_RATE = "word_error_rate"
   SET_PRECISION = "set_precision"
   SET_RECALL = "set_recall"
   SOFTMAX_CROSS_ENTROPY_ONE_HOT = "softmax_cross_entropy_one_hot"
   SIGMOID_ACCURACY_ONE_HOT = "sigmoid_accuracy_one_hot"
+  SIGMOID_ACCURACY = "sigmoid_accuracy"
   SIGMOID_RECALL_ONE_HOT = "sigmoid_recall_one_hot"
   SIGMOID_PRECISION_ONE_HOT = "sigmoid_precision_one_hot"
   SIGMOID_CROSS_ENTROPY_ONE_HOT = "sigmoid_cross_entropy_one_hot"
@@ -195,6 +197,41 @@ def padded_sequence_accuracy(predictions,
     axis = list(range(1, len(outputs.get_shape())))
     correct_seq = 1.0 - tf.minimum(1.0, tf.reduce_sum(not_correct, axis=axis))
     return correct_seq, tf.constant(1.0)
+
+
+def prefix_accuracy(predictions,
+                    labels,
+                    weights_fn=common_layers.weights_nonzero):
+  """Average # of correct tokens at start of sequences, ignoring padding 0s.
+
+  See section 4.3 of Learning to Transduce with Unbounded Memory,
+  Grefenstette et al., 2015.
+
+  Args:
+    predictions: Tensor of shape [`batch_size`, `length`, 1, `num_classes`] and
+        type tf.float32 representing the logits, 0-padded.
+    labels: Tensor of shape [`batch_size`, `length`, 1, 1] and type tf.int32
+        representing the labels of same length as logits and 0-padded.
+    weights_fn: ignored. The weights returned are the total length of the ground
+        truth labels, excluding 0-paddings.
+
+  Returns:
+    (prefix accuracy, 1.0)
+
+  Raises:
+    ValueError: if weights_fn is not common_layers.weights_nonzero.
+  """
+  if weights_fn is not common_layers.weights_nonzero:
+    raise ValueError("Only weights_nonzero can be used for this metric.")
+
+  predictions = tf.to_int32(tf.squeeze(tf.argmax(predictions, axis=-1), axis=2))
+  labels = tf.squeeze(labels, axis=(2, 3))
+  seq_len = tf.reduce_sum(
+      tf.cast(tf.not_equal(labels, tf.constant(0)), dtype=tf.float32), axis=1)
+  matching_elements = tf.equal(labels, predictions)
+  prefix_len = tf.reduce_sum(
+      tf.cumprod(tf.cast(matching_elements, tf.float32), axis=1), axis=1)
+  return tf.reduce_mean(prefix_len / seq_len), tf.constant(1.0)
 
 
 def sequence_edit_distance(predictions,
@@ -446,6 +483,24 @@ def sigmoid_accuracy_one_hot(logits, labels, weights_fn=None):
     del weights_fn
     predictions = tf.nn.sigmoid(logits)
     labels = tf.argmax(labels, -1)
+    predictions = tf.argmax(predictions, -1)
+    _, accuracy = tf.metrics.accuracy(labels=labels, predictions=predictions)
+    return accuracy, tf.constant(1.0)
+
+
+def sigmoid_accuracy(logits, labels, weights_fn=None):
+  """Calculate accuracy for a set, given integer labels and logits.
+
+  Args:
+    logits: Tensor of size [batch-size, o=1, p=1, num-classes]
+    labels: Tensor of size [batch-size, o=1, p=1]
+    weights_fn: Function that takes in labels and weighs examples (unused)
+  Returns:
+    accuracy (scalar), weights
+  """
+  with tf.variable_scope("sigmoid_accuracy", values=[logits, labels]):
+    del weights_fn
+    predictions = tf.nn.sigmoid(logits)
     predictions = tf.argmax(predictions, -1)
     _, accuracy = tf.metrics.accuracy(labels=labels, predictions=predictions)
     return accuracy, tf.constant(1.0)
@@ -798,8 +853,8 @@ METRICS_FNS = {
     Metrics.ROUGE_2_F: rouge.rouge_2_fscore,
     Metrics.ROUGE_L_F: rouge.rouge_l_fscore,
     Metrics.EDIT_DISTANCE: sequence_edit_distance,
-    Metrics.WORD_ERROR_RATE: word_error_rate,
     Metrics.SOFTMAX_CROSS_ENTROPY_ONE_HOT: softmax_cross_entropy_one_hot,
+    Metrics.SIGMOID_ACCURACY: sigmoid_accuracy,
     Metrics.SIGMOID_ACCURACY_ONE_HOT: sigmoid_accuracy_one_hot,
     Metrics.SIGMOID_RECALL_ONE_HOT: sigmoid_recall_one_hot,
     Metrics.SIGMOID_PRECISION_ONE_HOT: sigmoid_precision_one_hot,

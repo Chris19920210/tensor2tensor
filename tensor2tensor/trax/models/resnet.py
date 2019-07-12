@@ -19,76 +19,142 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from jax.experimental import stax
+from tensor2tensor.trax import layers as tl
 
 
 def ConvBlock(kernel_size, filters, strides):
   """ResNet convolutional striding block."""
+  # TODO(jonni): Use good defaults so Resnet50 code is cleaner / less redundant.
   ks = kernel_size
   filters1, filters2, filters3 = filters
-  main = stax.serial(
-      stax.Conv(filters1, (1, 1), strides),
-      stax.BatchNorm(), stax.Relu,
-      stax.Conv(filters2, (ks, ks), padding='SAME'),
-      stax.BatchNorm(), stax.Relu,
-      stax.Conv(filters3, (1, 1)), stax.BatchNorm())
-  shortcut = stax.serial(
-      stax.Conv(filters3, (1, 1), strides),
-      stax.BatchNorm())
-  return stax.serial(
-      stax.FanOut(2),
-      stax.parallel(main, shortcut),
-      stax.FanInSum, stax.Relu)
+  main = [
+      tl.Conv(filters1, (1, 1), strides),
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.Conv(filters2, (ks, ks), padding='SAME'),
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.Conv(filters3, (1, 1)),
+      tl.BatchNorm(),
+  ]
+  shortcut = [
+      tl.Conv(filters3, (1, 1), strides),
+      tl.BatchNorm(),
+  ]
+  return [
+      tl.Residual(main, shortcut=shortcut),
+      tl.Relu(),
+  ]
 
 
 def IdentityBlock(kernel_size, filters):
   """ResNet identical size block."""
+  # TODO(jonni): Use good defaults so Resnet50 code is cleaner / less redundant.
   ks = kernel_size
-  filters1, filters2 = filters
-  def MakeMain(input_shape):
-    # the number of output channels depends on the number of input channels
-    return stax.serial(
-        stax.Conv(filters1, (1, 1)),
-        stax.BatchNorm(), stax.Relu,
-        stax.Conv(filters2, (ks, ks), padding='SAME'),
-        stax.BatchNorm(), stax.Relu,
-        stax.Conv(input_shape[3], (1, 1)), stax.BatchNorm())
-  main = stax.shape_dependent(MakeMain)
-  return stax.serial(
-      stax.FanOut(2),
-      stax.parallel(main, stax.Identity),
-      stax.FanInSum, stax.Relu)
+  filters1, filters2, filters3 = filters
+  main = [
+      tl.Conv(filters1, (1, 1)),
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.Conv(filters2, (ks, ks), padding='SAME'),
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.Conv(filters3, (1, 1)),
+      tl.BatchNorm(),
+  ]
+  return [
+      tl.Residual(main),
+      tl.Relu(),
+  ]
 
 
-def Resnet50(hidden_size=64, num_output_classes=1001):
+def Resnet50(d_hidden=64, n_output_classes=1001, mode='train'):
   """ResNet.
 
   Args:
-    hidden_size: the size of the first hidden layer (multiplied later).
-    num_output_classes: how many classes to distinguish.
+    d_hidden: Dimensionality of the first hidden layer (multiplied later).
+    n_output_classes: Number of distinct output classes.
+    mode: Whether we are training or evaluating or doing inference.
 
   Returns:
-    The ResNet model with the given layer and output sizes.
+    The list of layers comprising a ResNet model with the given parameters.
   """
-  return stax.serial(
-      stax.Conv(hidden_size, (7, 7), (2, 2), 'SAME'),
-      stax.BatchNorm(), stax.Relu,
-      stax.MaxPool((3, 3), strides=(2, 2)),
-      ConvBlock(3, [hidden_size, hidden_size, 4 * hidden_size], (1, 1)),
-      IdentityBlock(3, [hidden_size, hidden_size]),
-      IdentityBlock(3, [hidden_size, hidden_size]),
-      ConvBlock(3, [2 * hidden_size, 2 * hidden_size, 8 * hidden_size], (2, 2)),
-      IdentityBlock(3, [2 * hidden_size, 2 * hidden_size]),
-      IdentityBlock(3, [2 * hidden_size, 2 * hidden_size]),
-      IdentityBlock(3, [2 * hidden_size, 2 * hidden_size]),
-      ConvBlock(3, [4 * hidden_size, 4 * hidden_size, 16*hidden_size], (2, 2)),
-      IdentityBlock(3, [4 * hidden_size, 4 * hidden_size]),
-      IdentityBlock(3, [4 * hidden_size, 4 * hidden_size]),
-      IdentityBlock(3, [4 * hidden_size, 4 * hidden_size]),
-      IdentityBlock(3, [4 * hidden_size, 4 * hidden_size]),
-      IdentityBlock(3, [4 * hidden_size, 4 * hidden_size]),
-      ConvBlock(3, [8 * hidden_size, 8 * hidden_size, 32*hidden_size], (2, 2)),
-      IdentityBlock(3, [8 * hidden_size, 8 * hidden_size]),
-      IdentityBlock(3, [8 * hidden_size, 8 * hidden_size]),
-      stax.AvgPool((7, 7)), stax.Flatten,
-      stax.Dense(num_output_classes), stax.LogSoftmax)
+  del mode
+  return tl.Model(
+      tl.ToFloat(),
+      tl.Conv(d_hidden, (7, 7), (2, 2), 'SAME'),
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.MaxPool(pool_size=(3, 3), strides=(2, 2)),
+      ConvBlock(3, [d_hidden, d_hidden, 4 * d_hidden], (1, 1)),
+      IdentityBlock(3, [d_hidden, d_hidden, 4 * d_hidden]),
+      IdentityBlock(3, [d_hidden, d_hidden, 4 * d_hidden]),
+      ConvBlock(3, [2 * d_hidden, 2 * d_hidden, 8 * d_hidden], (2, 2)),
+      IdentityBlock(3, [2 * d_hidden, 2 * d_hidden, 8 * d_hidden]),
+      IdentityBlock(3, [2 * d_hidden, 2 * d_hidden, 8 * d_hidden]),
+      IdentityBlock(3, [2 * d_hidden, 2 * d_hidden, 8 * d_hidden]),
+      ConvBlock(3, [4 * d_hidden, 4 * d_hidden, 16 * d_hidden], (2, 2)),
+      IdentityBlock(3, [4 * d_hidden, 4 * d_hidden, 16 * d_hidden]),
+      IdentityBlock(3, [4 * d_hidden, 4 * d_hidden, 16 * d_hidden]),
+      IdentityBlock(3, [4 * d_hidden, 4 * d_hidden, 16 * d_hidden]),
+      IdentityBlock(3, [4 * d_hidden, 4 * d_hidden, 16 * d_hidden]),
+      IdentityBlock(3, [4 * d_hidden, 4 * d_hidden, 16 * d_hidden]),
+      ConvBlock(3, [8 * d_hidden, 8 * d_hidden, 32 * d_hidden], (2, 2)),
+      IdentityBlock(3, [8 * d_hidden, 8 * d_hidden, 32 * d_hidden]),
+      IdentityBlock(3, [8 * d_hidden, 8 * d_hidden, 32 * d_hidden]),
+      tl.AvgPool(pool_size=(7, 7)),
+      tl.Flatten(),
+      tl.Dense(n_output_classes),
+      tl.LogSoftmax(),
+  )
+
+
+def WideResnetBlock(channels, strides=(1, 1)):
+  """WideResnet convolutional block."""
+  return [
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.Conv(channels, (3, 3), strides, padding='SAME'),
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.Conv(channels, (3, 3), padding='SAME'),
+  ]
+
+
+def WideResnetGroup(n, channels, strides=(1, 1)):
+  shortcut = [
+      tl.Conv(channels, (3, 3), strides, padding='SAME'),
+  ]
+  return [
+      tl.Residual(WideResnetBlock(channels, strides), shortcut=shortcut),
+      tl.Residual([WideResnetBlock(channels, (1, 1))
+                   for _ in range(n - 1)]),
+  ]
+
+
+def WideResnet(n_blocks=3, widen_factor=1, n_output_classes=10, mode='train'):
+  """WideResnet from https://arxiv.org/pdf/1605.07146.pdf.
+
+  Args:
+    n_blocks: int, number of blocks in a group. total layers = 6n + 4.
+    widen_factor: int, widening factor of each group. k=1 is vanilla resnet.
+    n_output_classes: int, number of distinct output classes.
+    mode: Whether we are training or evaluating or doing inference.
+
+  Returns:
+    The list of layers comprising a WideResnet model with the given parameters.
+  """
+  del mode
+  return tl.Model(
+      tl.ToFloat(),
+      tl.Conv(16, (3, 3), padding='SAME'),
+      WideResnetGroup(n_blocks, 16 * widen_factor),
+      WideResnetGroup(n_blocks, 32 * widen_factor, (2, 2)),
+      WideResnetGroup(n_blocks, 64 * widen_factor, (2, 2)),
+      tl.BatchNorm(),
+      tl.Relu(),
+      tl.AvgPool(pool_size=(8, 8)),
+      tl.Flatten(),
+      tl.Dense(n_output_classes),
+      tl.LogSoftmax(),
+  )

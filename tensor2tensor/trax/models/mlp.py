@@ -19,14 +19,20 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from jax.experimental import stax
+from tensor2tensor.trax import layers as tl
 
 
-def MLP(num_hidden_layers=2,
-        hidden_size=512,
-        activation_fn=stax.Relu,
-        num_output_classes=10):
-  layers = [stax.Flatten]
-  layers += [stax.Dense(hidden_size), activation_fn] * num_hidden_layers
-  layers += [stax.Dense(num_output_classes), stax.LogSoftmax]
-  return stax.serial(*layers)
+def MLP(n_hidden_layers=2,
+        d_hidden=512,
+        activation_fn=tl.Relu,
+        n_output_classes=10,
+        mode="train"):
+  """A multi-layer feedforward (perceptron) network."""
+  del mode
+
+  return tl.Model(
+      tl.Flatten(),
+      [[tl.Dense(d_hidden), activation_fn()] for _ in range(n_hidden_layers)],
+      tl.Dense(n_output_classes),
+      tl.LogSoftmax(),
+  )

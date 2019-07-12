@@ -30,6 +30,9 @@ import gin
 import jax
 from tensor2tensor.trax import trax
 
+import tensorflow as tf
+
+
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("dataset", None, "Which dataset to use.")
@@ -43,14 +46,19 @@ flags.DEFINE_multi_string("config", None,
                           "Configuration parameters (gin string).")
 flags.DEFINE_integer("log_level", logging.INFO, "Log level.")
 flags.DEFINE_bool("use_tpu", False, "Whether we're running on TPU.")
-
+flags.DEFINE_bool("tf_eager", False, "Whether we're running TF in eager mode.")
+flags.DEFINE_bool("tf_xla", False, "Whether to turn on XLA for TF.")
 
 
 def _default_output_dir():
   """Default output directory."""
+  try:
+    dataset_name = gin.query_parameter("inputs.dataset_name")
+  except ValueError:
+    dataset_name = "random"
   dir_name = "{model_name}_{dataset_name}_{timestamp}".format(
       model_name=gin.query_parameter("train.model").configurable.name,
-      dataset_name=gin.query_parameter("inputs.dataset_name"),
+      dataset_name=dataset_name,
       timestamp=datetime.datetime.now().strftime("%Y%m%d_%H%M"),
   )
   dir_path = os.path.join("~", "trax", dir_name)
@@ -80,6 +88,12 @@ def _setup_gin():
 
 def main(_):
   logging.set_verbosity(FLAGS.log_level)
+
+  if FLAGS.tf_eager:
+    tf.enable_eager_execution()
+
+  if FLAGS.tf_xla:
+    tf.config.optimizer.set_jit(True)
 
   _setup_gin()
 
