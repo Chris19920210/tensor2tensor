@@ -14,10 +14,12 @@ if [ ! -d $RESULT_DIR  ];then
     mkdir $RESULT_DIR
 fi
 INFER_RESULT=$RESULT_DIR/infer_result.txt
-SRC_TEXT=/home/chenrihan/nmt_datasets_final/test/ai_challenger_en-zh.en.tok.test
-REF_TEXT=/home/chenrihan/nmt_datasets_final/test/ai_challenger_en-zh.zh.tok.test
+#SRC_TEXT=/home/wudong/nmt_datasets_final/ai_challenger_en-zh.en.tok.test
+#REF_TEXT=/home/wudong/nmt_datasets_final/ai_challenger_en-zh.zh.tok.test
+SRC_TEXT=long.txt
+REF_TEXT=long.txt
 CODE_BASE=/home/wudong/t2t_aan/tensor2tensor
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=3,4
 export PYTHONPATH=$USR_DIR:$PYTHONPATH
 
 t2t-decoder \

@@ -1,21 +1,32 @@
-MT evaluation scorer began on 2019 Apr 24 at 13:36:34
+MT evaluation scorer began on 2019 Jun 27 at 15:26:36
 command line:  /home/wudong/t2t_aan/tensor2tensor/ai_tools/mteval-v11b.pl -s /home/wudong/t2t_aan/translatespm_enzh_ai32k/aan_transformer-res/src.sgm -r work-translatespm_enzh_ai32k-aan_transformer-aan_transformer_base/ref.seg.sgm -t work-translatespm_enzh_ai32k-aan_transformer-aan_transformer_base/hyp.seg.sgm -c
   Evaluation of en-to-zh translation using:
-    src set "newsdev2017" (1 docs, 8000 segs)
-    ref set "newsdev2017" (0 refs)
-    tst set "newsdev2017" (0 systems)
+    src set "newsdev2017" (1 docs, 2 segs)
+    ref set "newsdev2017" (1 refs)
+    tst set "newsdev2017" (1 systems)
 
+130 71  min_ref:71, min_cand_ref: 71 doc: 71 cum: 71 
+186 285  min_ref:285, min_cand_ref: 186 doc: 186 cum: 257 
+130 71  min_ref:71, min_cand_ref: 71 doc: 71 cum: 71 
+186 285  min_ref:285, min_cand_ref: 186 doc: 186 cum: 257 
+short_ref_length: 356 min: 257 
+bp: -0.385214007782101 exp_bp: 0.680305030054085
+NIST score = 0.7463  BLEU score = 0.0000 for system "DemoSystem"
 
 # ------------------------------------------------------------------------
 
 Individual N-gram scoring
         1-gram   2-gram   3-gram   4-gram   5-gram   6-gram   7-gram   8-gram   9-gram
         ------   ------   ------   ------   ------   ------   ------   ------   ------
+ NIST:  0.6886   0.0577   0.0000   0.0000   0.0000   0.0000   0.0000   0.0000   0.0000  "DemoSystem"
 
+ BLEU:  0.1804   0.0255   0.0128   0.0000   0.0000   0.0000   0.0000   0.0000   0.0000  "DemoSystem"
 
 # ------------------------------------------------------------------------
 Cumulative N-gram scoring
         1-gram   2-gram   3-gram   4-gram   5-gram   6-gram   7-gram   8-gram   9-gram
         ------   ------   ------   ------   ------   ------   ------   ------   ------
+ NIST:  0.6886   0.7463   0.7463   0.7463   0.7463   0.7463   0.7463   0.7463   0.7463  "DemoSystem"
 
-MT evaluation scorer ended on 2019 Apr 24 at 13:36:35
+ BLEU:  0.1227   0.0461   0.0265   0.0000   0.0000   0.0000   0.0000   0.0000   0.0000  "DemoSystem"
+MT evaluation scorer ended on 2019 Jun 27 at 15:26:36

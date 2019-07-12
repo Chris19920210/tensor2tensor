@@ -5,7 +5,7 @@ DATA_DIR=/home/wudong/t2t_aan/t2t_data_bpe_tok_enzh_same_all_32k
 MODEL=aan_transformer
 HPARAMS=aan_transformer_base
 TRAIN_DIR=/home/wudong/t2t_aan/$PROBLEM/$MODEL-$HPARAMS-bpe-tok
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 export PYTHONPATH=$USR_DIR:$PYTHONPATH
 
 t2t-trainer \
@@ -18,4 +18,4 @@ t2t-trainer \
   --train_steps=1300000 \
   --hparams="batch_size=8192" \
   --random_seed=210 \
-  --worker_gpu=2
+  --worker_gpu=4

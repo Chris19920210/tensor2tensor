@@ -38,6 +38,7 @@ from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
 from tensor2tensor.utils import expert_utils
 from tensor2tensor.models.transformer import transformer_base_v3
+from tensor2tensor.models.evolved_transformer import evolved_transformer_encoder
 
 import tensorflow as tf
 
@@ -48,7 +49,8 @@ from tensorflow.python.util import nest
 
 # Alias some commonly reused layers, here and elsewhere.
 transformer_prepare_encoder = transformer_layers.transformer_prepare_encoder
-transformer_encoder = transformer_layers.transformer_encoder
+#transformer_encoder = transformer_layers.transformer_encoder
+transformer_encoder = evolved_transformer_encoder
 transformer_ffn_layer = transformer_layers.transformer_ffn_layer
 
 

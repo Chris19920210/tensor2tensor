@@ -920,6 +920,7 @@ class Problem(object):
 
     dataset = dataset.map(data_reader.standardize_shapes)
     features = tf.data.experimental.get_single_element(dataset)
+    print("======>>>>>>", features, dataset)
 
     if self.has_inputs:
       features.pop("targets", None)
