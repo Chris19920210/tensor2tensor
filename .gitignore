@@ -12,10 +12,12 @@ _pycache__/
 # PyPI distribution artifacts.
 build/
 dist/
+work-*/
 
 # Sublime project files
 *.sublime-project
 *.sublime-workspace
+*.log
 
 # Tests
 .pytest_cache/
